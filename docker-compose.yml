@@ -1,0 +1,25 @@
+# Local development PostgreSQL for the trading bot.
+# Usage: docker compose up -d
+# Matches the default BOT_DATABASE_URL in .env:
+#   postgresql://postgres:postgres@localhost:5432/trading_bot
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: trading-bot-db
+    restart: unless-stopped
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: trading_bot
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d trading_bot"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  pg-data:
