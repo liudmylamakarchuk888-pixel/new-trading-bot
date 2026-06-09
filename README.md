@@ -31,10 +31,10 @@ docker compose up -d
 BOT_DATABASE_URL=postgresql://postgres:postgres@localhost:5432/trading_bot
 
 # 로컬에서 VPS(Supabase Postgres, 5432 -> 54322 포트 매핑)의 DB 사용
-# BOT_DATABASE_URL=postgresql://postgres:postgres-dev-password@141.136.44.1:54322/trading_bot
+# BOT_DATABASE_URL=postgresql://postgres:postgres-dev-password@141.136.44.1:54322/trading_bot?sslmode=disable
 
 # VPS 위에서 봇을 직접 실행할 때
-# BOT_DATABASE_URL=postgresql://postgres:postgres-dev-password@localhost:54322/trading_bot
+# BOT_DATABASE_URL=postgresql://postgres:postgres-dev-password@localhost:54322/trading_bot?sslmode=disable
 ```
 
 ## 사용 순서

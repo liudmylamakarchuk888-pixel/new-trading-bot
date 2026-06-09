@@ -10,7 +10,7 @@ The database is selected with BOT_DATABASE_URL (.env), e.g.
 """
 from __future__ import annotations
 
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 
 import psycopg
 from psycopg.rows import dict_row
@@ -98,8 +98,9 @@ def ensure_database(database_url: str) -> None:
     except psycopg.OperationalError as e:
         if "does not exist" not in str(e):
             raise
-    dbname = urlsplit(database_url).path.lstrip("/")
-    admin_url = database_url.rsplit("/", 1)[0] + "/postgres"
+    parts = urlsplit(database_url)
+    dbname = parts.path.lstrip("/")
+    admin_url = urlunsplit(parts._replace(path="/postgres"))
     with psycopg.connect(admin_url, autocommit=True) as conn:
         conn.execute(f'CREATE DATABASE "{dbname}"')
 

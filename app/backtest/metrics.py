@@ -65,8 +65,8 @@ def mode_summary(conn: psycopg.Connection, mode: str) -> dict:
 
 def daily_pnl(conn: psycopg.Connection, mode: str) -> list[tuple[str, float, int]]:
     cur = conn.execute(
-        """SELECT to_char(to_timestamp(ts) AT TIME ZONE 'UTC', 'YYYY-MM-DD') day,
-                  SUM(pnl) pnl, COUNT(*) n
+        """SELECT to_char(to_timestamp(ts) AT TIME ZONE 'UTC', 'YYYY-MM-DD') AS day,
+                  SUM(pnl) AS pnl, COUNT(*) AS n
            FROM paper_settlements WHERE mode=%s GROUP BY day ORDER BY day""", (mode,))
     return [(r["day"], r["pnl"], r["n"]) for r in cur.fetchall()]
 
@@ -74,9 +74,9 @@ def daily_pnl(conn: psycopg.Connection, mode: str) -> list[tuple[str, float, int
 def edge_buckets(conn: psycopg.Connection, mode: str) -> list[tuple[str, int, int]]:
     """Distribution of entry edge across orders (placed vs filled)."""
     cur = conn.execute(
-        """SELECT floor(edge*100)::int bucket,
-                  COUNT(*) placed,
-                  SUM(CASE WHEN filled > 0 THEN 1 ELSE 0 END) touched
+        """SELECT floor(edge*100)::int AS bucket,
+                  COUNT(*) AS placed,
+                  SUM(CASE WHEN filled > 0 THEN 1 ELSE 0 END) AS touched
            FROM paper_orders WHERE mode=%s GROUP BY bucket ORDER BY bucket""", (mode,))
     return [(f"{r['bucket']}-{r['bucket'] + 1}%", r["placed"], r["touched"] or 0)
             for r in cur.fetchall()]
