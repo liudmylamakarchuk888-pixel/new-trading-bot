@@ -5,6 +5,9 @@
 
 Detection is deliberately conservative (measured against the ask), while the
 actual paper order is placed as a maker order below the ask.
+
+Exit hysteresis (edge dropped below exit_edge) is applied in StrategyEngine so
+a resting order is not cancelled just because edge fell from 3% to 2%.
 """
 from __future__ import annotations
 
@@ -59,11 +62,20 @@ def evaluate_market(
 
 
 def maker_price(fair: float, best_bid: float, best_ask: float, cfg: Settings) -> float | None:
-    """Maker buy price: improve the bid by one tick, but never pay more than
-    fair - cost - min_edge, and always stay below the ask (maker-only).
+    """Maker buy price. Mode controls aggressiveness (fill test vs production).
+
+    conservative: improve bid by one tick, capped at fair - cost - min_edge
+    join_bid:     rest at best bid (max fill probability for testing)
+    improve_tick: one tick above bid, no fair cap (fill test only)
     """
-    cap = fair - cfg.cost - cfg.min_edge
-    p = min(best_bid + cfg.tick, best_ask - cfg.tick, cap)
+    mode = cfg.quote_mode.lower()
+    if mode == "join_bid":
+        p = best_bid
+    elif mode == "improve_tick":
+        p = min(best_bid + cfg.tick, best_ask - cfg.tick)
+    else:
+        cap = fair - cfg.cost - cfg.min_edge
+        p = min(best_bid + cfg.tick, best_ask - cfg.tick, cap)
     p = math.floor(p / cfg.tick + 1e-9) * cfg.tick
     p = round(p, 4)
     if p < 0.01 or p >= best_ask:

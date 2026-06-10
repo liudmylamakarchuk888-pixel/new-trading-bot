@@ -85,7 +85,7 @@ check("expiry cutoff blocked", all(s.reason == "expiry_cutoff" for s in sigs))
 
 mp = maker_price(0.56, 0.50, 0.52, cfg)
 check("maker price improves bid, stays under ask", mp == 0.51)
-check("maker never crosses cap", maker_price(0.52, 0.50, 0.52, cfg) == 0.49)
+check("maker never crosses cap", maker_price(0.52, 0.50, 0.52, cfg) == 0.48)
 
 # --- paper engine end-to-end (synthetic) -------------------------------------------
 conn = connect_sync(cfg.database_url)

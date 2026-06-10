@@ -20,7 +20,8 @@ class Settings(BaseSettings):
     market_refresh_s: float = 300.0
 
     # strategy
-    min_edge: float = 0.02
+    min_edge: float = 0.03              # enter when edge >= this (hysteresis high)
+    exit_edge: float = 0.01             # keep resting order until edge drops below this
     cost: float = 0.01
     max_spread: float = 0.08
     expiry_cutoff_min: float = 5.0
@@ -31,10 +32,14 @@ class Settings(BaseSettings):
     max_spot_age_s: float = 120.0
 
     # order churn control
-    order_cooldown_s: float = 15.0        # same token: wait after a (non-replace) cancel
-    replace_edge_threshold: float = 0.005 # replace an open order only if fair moved this much
+    order_cooldown_s: float = 90.0      # same token: wait after a (non-replace) cancel
+    market_cooldown_s: float = 90.0     # same market: min gap between new orders
+    replace_edge_threshold: float = 0.01  # replace only if |fair-old| >= this
     expiry_taper_min: float = 15.0        # halve order size this close to expiry
     expiry_cancel_min: float = 2.0        # cancel all open orders this close to expiry
+
+    # quote placement: conservative (default) | join_bid | improve_tick (fill test)
+    quote_mode: str = "conservative"
 
     # YES/NO arbitrage scanner (record-only)
     arb_min_edge: float = 0.005

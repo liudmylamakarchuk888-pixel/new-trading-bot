@@ -160,8 +160,12 @@ class LiveRunner:
             if self.engine is not None:
                 s = self.engine.stats
                 now = time.time()
+                u = self.engine.unrealized_summary()
                 line += (f" | orders={s['orders']} fills={s['fills']} "
                          f"settled={s['settlements']} todayPnL=${self.engine.risk.today_pnl(now):+.2f}")
+                if u.positions:
+                    line += (f" open={len(u.positions)} exp=${u.total_cost_usd:.0f} "
+                             f"uPnL=${u.total_unrealized_pnl:+.2f}")
                 if self.engine.risk.halted_reason:
                     line += f" [HALTED: {self.engine.risk.halted_reason}]"
             log.info(line)
@@ -197,6 +201,11 @@ class LiveRunner:
                 if t.exception():
                     raise t.exception()
         finally:
+            if self.engine is not None:
+                try:
+                    self.engine.cancel_all(time.time(), "manual_shutdown")
+                except Exception:
+                    log.exception("failed to cancel open orders on shutdown")
             for t in asyncio.all_tasks():
                 if t is not asyncio.current_task():
                     t.cancel()

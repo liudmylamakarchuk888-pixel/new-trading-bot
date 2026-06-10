@@ -101,6 +101,11 @@ def mode_summary(conn: psycopg.Connection, mode: str) -> dict:
         peak = max(peak, cum)
         mdd = min(mdd, cum - peak)
     s["max_drawdown"] = mdd
+
+    upnl = unrealized_pnl(conn, mode)
+    s["open_positions"] = upnl["open_positions"]
+    s["total_exposure_usd"] = upnl["total_exposure_usd"]
+    s["unrealized_pnl"] = upnl["unrealized_pnl"]
     return s
 
 
@@ -172,10 +177,55 @@ def reason_distribution(conn: psycopg.Connection, mode: str) -> list[tuple[str, 
 
 def cancel_reasons(conn: psycopg.Connection, mode: str) -> list[tuple[str, int]]:
     cur = conn.execute(
-        """SELECT COALESCE(cancel_reason, 'unknown') reason, COUNT(*) n
+        """SELECT CASE
+                  WHEN cancel_reason IS NULL THEN 'legacy_unknown'
+                  ELSE cancel_reason
+               END reason, COUNT(*) n
            FROM paper_orders WHERE mode=%s AND status='cancelled'
            GROUP BY reason ORDER BY n DESC""", (mode,))
     return [(r["reason"], r["n"]) for r in cur.fetchall()]
+
+
+def unrealized_pnl(conn: psycopg.Connection, mode: str) -> dict:
+    """Open positions from fills not yet settled, marked to latest book mid."""
+    rows = conn.execute(
+        """WITH open_pos AS (
+               SELECT f.token_id, f.condition_id, o.label,
+                      SUM(f.size) AS size,
+                      SUM(f.price * f.size) / NULLIF(SUM(f.size), 0) AS avg_price
+               FROM paper_fills f
+               JOIN paper_orders o ON o.id = f.order_id
+               WHERE f.mode = %s
+                 AND f.token_id NOT IN (
+                     SELECT token_id FROM paper_settlements WHERE mode = %s)
+               GROUP BY f.token_id, f.condition_id, o.label
+           ),
+           latest_mid AS (
+               SELECT DISTINCT ON (token_id) token_id, mid
+               FROM book_snapshots
+               WHERE mid IS NOT NULL
+               ORDER BY token_id, ts DESC
+           )
+           SELECT p.token_id, p.condition_id, p.label, p.size, p.avg_price,
+                  m.mid AS mark_price,
+                  p.size * p.avg_price AS cost_usd,
+                  p.size * m.mid AS mark_usd,
+                  p.size * (m.mid - p.avg_price) AS unrealized_pnl,
+                  COALESCE(mk.question, p.condition_id) AS question
+           FROM open_pos p
+           LEFT JOIN latest_mid m ON m.token_id = p.token_id
+           LEFT JOIN markets mk ON mk.condition_id = p.condition_id
+           ORDER BY ABS(p.size * (m.mid - p.avg_price)) DESC NULLS LAST""",
+        (mode, mode),
+    ).fetchall()
+    total_cost = sum(r["cost_usd"] or 0 for r in rows)
+    total_upnl = sum(r["unrealized_pnl"] or 0 for r in rows if r["mark_price"] is not None)
+    return {
+        "open_positions": len(rows),
+        "total_exposure_usd": total_cost,
+        "unrealized_pnl": total_upnl,
+        "positions": rows,
+    }
 
 
 def pnl_by_side(conn: psycopg.Connection, mode: str) -> list[dict]:
@@ -261,8 +311,29 @@ def _print_mode(console: Console, conn: psycopg.Connection, mode: str) -> None:
         t.add_row("expected edge (entry, settled fills)", f"{s['expected_edge']*100:+.2f}%")
         t.add_row("realized edge (per settled share)", f"{s['realized_edge']*100:+.2f}%")
     t.add_row("realized PnL", f"${s['pnl']:+.2f}")
+    if s.get("open_positions"):
+        t.add_row("open positions", str(s["open_positions"]))
+        t.add_row("total exposure", f"${s['total_exposure_usd']:.2f}")
+        t.add_row("unrealized PnL (mid mark)", f"${s['unrealized_pnl']:+.2f}")
     t.add_row("max drawdown", f"${s['max_drawdown']:.2f}")
     console.print(t)
+
+    upnl = unrealized_pnl(conn, mode)
+    if upnl["positions"]:
+        t = Table(title=f"{mode} open positions (unrealized)")
+        t.add_column("market"); t.add_column("side")
+        t.add_column("size", justify="right"); t.add_column("avg", justify="right")
+        t.add_column("mid", justify="right"); t.add_column("exposure", justify="right")
+        t.add_column("uPnL", justify="right")
+        for r in upnl["positions"][:15]:
+            t.add_row(
+                r["question"][:50], r["label"],
+                f"{r['size']:.1f}", f"{r['avg_price']:.3f}",
+                f"{r['mark_price']:.3f}" if r["mark_price"] is not None else "-",
+                f"${r['cost_usd']:.2f}",
+                f"${r['unrealized_pnl']:+.2f}" if r["unrealized_pnl"] is not None else "-",
+            )
+        console.print(t)
 
     days = daily_pnl(conn, mode)
     if days:
@@ -316,6 +387,9 @@ def _print_mode(console: Console, conn: psycopg.Connection, mode: str) -> None:
         for reason, n in cancels:
             t.add_row(reason, str(n))
         console.print(t)
+        if any(r == "legacy_unknown" for r, _ in cancels):
+            console.print("[dim]legacy_unknown = cancelled before cancel_reason logging "
+                          "(or missing update); new runs use explicit reasons[/dim]")
 
     churn = churn_by_market(conn, mode)
     if churn:
