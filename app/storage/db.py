@@ -113,9 +113,15 @@ def ensure_database(database_url: str) -> None:
         conn.execute(f'CREATE DATABASE "{dbname}"')
 
 
+# TCP keepalives: the DB is often remote (VPS); long replay streams and idle
+# live connections get dropped by NAT/firewalls without these.
+KEEPALIVE_KWARGS = dict(
+    keepalives=1, keepalives_idle=30, keepalives_interval=10, keepalives_count=5)
+
+
 def connect_sync(database_url: str) -> psycopg.Connection:
     ensure_database(database_url)
-    conn = psycopg.connect(database_url, row_factory=dict_row)
+    conn = psycopg.connect(database_url, row_factory=dict_row, **KEEPALIVE_KWARGS)
     conn.execute(SCHEMA)
     conn.commit()
     return conn
@@ -123,7 +129,8 @@ def connect_sync(database_url: str) -> psycopg.Connection:
 
 async def connect_async(database_url: str) -> psycopg.AsyncConnection:
     ensure_database(database_url)
-    conn = await psycopg.AsyncConnection.connect(database_url, row_factory=dict_row)
+    conn = await psycopg.AsyncConnection.connect(
+        database_url, row_factory=dict_row, **KEEPALIVE_KWARGS)
     await conn.execute(SCHEMA)
     await conn.commit()
     return conn
