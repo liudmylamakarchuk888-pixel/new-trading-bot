@@ -10,6 +10,8 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import selectors
+import sys
 import time
 from datetime import datetime, timezone
 
@@ -251,8 +253,12 @@ def main() -> None:
     cfg = load_settings()
     if args.command in ("collect", "paper"):
         runner = LiveRunner(cfg, paper=args.command == "paper")
+        # async psycopg cannot run on the Windows default ProactorEventLoop
+        loop_factory = None
+        if sys.platform == "win32":
+            loop_factory = lambda: asyncio.SelectorEventLoop(selectors.SelectSelector())
         try:
-            asyncio.run(runner.run())
+            asyncio.run(runner.run(), loop_factory=loop_factory)
         except KeyboardInterrupt:
             log.info("stopped by user")
     elif args.command == "backtest":

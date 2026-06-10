@@ -74,6 +74,14 @@ class OrderBook:
             return None
         return ba - bb
 
+    @property
+    def crossed(self) -> bool:
+        """bid >= ask is an impossible resting state on a real CLOB; it means a
+        corrupted/merged book (e.g. complement-token levels on the wrong side).
+        Any price derived from a crossed book must not be trusted."""
+        bb, ba = self.best_bid, self.best_ask
+        return bb is not None and ba is not None and bb >= ba - 1e-9
+
     def ask_size_at_or_below(self, price: float) -> float:
         return sum(s for p, s in self.asks if p <= price + 1e-9)
 
@@ -153,6 +161,7 @@ class PaperOrder:
     status: str = "open"  # open | filled | cancelled
     fair: float = 0.0
     edge: float = 0.0
+    cancel_reason: str | None = None  # replace | signal_exit | expiry | settlement | kill_switch | backtest_end
 
     @property
     def remaining(self) -> float:
@@ -176,9 +185,18 @@ class Position:
 class ArbOpportunity:
     ts: float
     condition_id: str
+    yes_token_id: str
+    no_token_id: str
     yes_ask: float
     no_ask: float
     total: float
     edge: float
     yes_size: float
     no_size: float
+    yes_book_ts: float
+    no_book_ts: float
+    status: str = "ok"   # 'ok' or rejection reason (stale_book, book_ts_gap, ...)
+
+    @property
+    def book_ts_gap(self) -> float:
+        return abs(self.yes_book_ts - self.no_book_ts)

@@ -193,7 +193,7 @@ class Backtester:
             spot = last_spot.get(m.asset)
             if spot is None:
                 # no spot data: cancel this market's orders, drop it unsettled
-                engine.cancel_market_orders(m.condition_id, now)
+                engine.cancel_market_orders(m.condition_id, now, "no_settlement_data")
                 hub.remove_market(m.condition_id)
                 return
             hit = spot >= m.strike if m.direction == "above" else spot <= m.strike

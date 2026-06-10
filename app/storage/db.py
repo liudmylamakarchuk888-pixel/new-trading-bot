@@ -87,6 +87,14 @@ CREATE TABLE IF NOT EXISTS arb_opportunities(
     total DOUBLE PRECISION, edge DOUBLE PRECISION,
     yes_size DOUBLE PRECISION, no_size DOUBLE PRECISION
 );
+
+-- migrations for databases created before these columns existed
+ALTER TABLE paper_orders ADD COLUMN IF NOT EXISTS cancel_reason TEXT;
+ALTER TABLE arb_opportunities ADD COLUMN IF NOT EXISTS yes_token_id TEXT;
+ALTER TABLE arb_opportunities ADD COLUMN IF NOT EXISTS no_token_id TEXT;
+ALTER TABLE arb_opportunities ADD COLUMN IF NOT EXISTS yes_book_ts DOUBLE PRECISION;
+ALTER TABLE arb_opportunities ADD COLUMN IF NOT EXISTS no_book_ts DOUBLE PRECISION;
+ALTER TABLE arb_opportunities ADD COLUMN IF NOT EXISTS status TEXT;
 """
 
 
@@ -199,8 +207,8 @@ class Sink:
 
     def order_update(self, o: PaperOrder, closed_ts: float | None = None) -> None:
         self.add(
-            "UPDATE paper_orders SET status=%s, filled=%s, closed_ts=%s WHERE id=%s",
-            (o.status, o.filled, closed_ts, o.id),
+            "UPDATE paper_orders SET status=%s, filled=%s, closed_ts=%s, cancel_reason=%s WHERE id=%s",
+            (o.status, o.filled, closed_ts, o.cancel_reason, o.id),
         )
 
     def fill(self, order: PaperOrder, ts: float, price: float, size: float) -> None:
@@ -220,9 +228,13 @@ class Sink:
 
     def arb(self, a: ArbOpportunity) -> None:
         self.add(
-            """INSERT INTO arb_opportunities(ts, condition_id, yes_ask, no_ask, total, edge,
-                   yes_size, no_size) VALUES(%s,%s,%s,%s,%s,%s,%s,%s)""",
-            (a.ts, a.condition_id, a.yes_ask, a.no_ask, a.total, a.edge, a.yes_size, a.no_size),
+            """INSERT INTO arb_opportunities(ts, condition_id, yes_token_id, no_token_id,
+                   yes_ask, no_ask, total, edge, yes_size, no_size,
+                   yes_book_ts, no_book_ts, status)
+               VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+            (a.ts, a.condition_id, a.yes_token_id, a.no_token_id,
+             a.yes_ask, a.no_ask, a.total, a.edge, a.yes_size, a.no_size,
+             a.yes_book_ts, a.no_book_ts, a.status),
         )
 
     # ---- flushing ----------------------------------------------------------

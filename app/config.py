@@ -30,9 +30,18 @@ class Settings(BaseSettings):
     min_vol_candles: int = 60
     max_spot_age_s: float = 120.0
 
+    # order churn control
+    order_cooldown_s: float = 15.0        # same token: wait after a (non-replace) cancel
+    replace_edge_threshold: float = 0.005 # replace an open order only if fair moved this much
+    expiry_taper_min: float = 15.0        # halve order size this close to expiry
+    expiry_cancel_min: float = 2.0        # cancel all open orders this close to expiry
+
     # YES/NO arbitrage scanner (record-only)
     arb_min_edge: float = 0.005
     arb_log_interval_s: float = 60.0
+    arb_max_book_age_s: float = 30.0      # either book older than this vs now -> stale
+    arb_max_book_gap_s: float = 1.0       # |yes_book.ts - no_book.ts| above this -> reject
+    arb_min_depth: float = 5.0            # min visible shares at best ask on both legs
 
     # risk
     bankroll: float = 500.0
@@ -48,6 +57,14 @@ class Settings(BaseSettings):
     @property
     def expiry_cutoff_s(self) -> float:
         return self.expiry_cutoff_min * 60.0
+
+    @property
+    def expiry_taper_s(self) -> float:
+        return self.expiry_taper_min * 60.0
+
+    @property
+    def expiry_cancel_s(self) -> float:
+        return self.expiry_cancel_min * 60.0
 
 
 def load_settings() -> Settings:

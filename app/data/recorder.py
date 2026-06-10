@@ -92,7 +92,8 @@ class Recorder:
         self.sink = sink
         self._last_snapshot_ts: dict[str, float] = {}
         self._last_spot_persist: dict[str, float] = {}
-        self.counters = {"books": 0, "ticks": 0, "trades": 0, "crypto": 0}
+        self._last_crossed_warn: dict[str, float] = {}
+        self.counters = {"books": 0, "ticks": 0, "trades": 0, "crypto": 0, "crossed_books": 0}
 
     # Polymarket WS events ----------------------------------------------------
 
@@ -106,6 +107,7 @@ class Recorder:
             st = self.hub.book_state(token)
             st.apply_snapshot(ev["bids"], ev["asks"], ev["ts"])
             book = st.to_book()
+            self._warn_if_crossed(book, "snapshot")
             self.sink.book_snapshot(book)
             self._last_snapshot_ts[token] = ev["ts"]
             self.counters["books"] += 1
@@ -118,6 +120,7 @@ class Recorder:
             last = self._last_snapshot_ts.get(token, 0.0)
             if ev["ts"] - last >= self.cfg.book_snapshot_interval_s and st.has_data:
                 book = st.to_book()
+                self._warn_if_crossed(book, "delta")
                 self.sink.book_snapshot(book)
                 self._last_snapshot_ts[token] = ev["ts"]
                 return book
@@ -129,6 +132,18 @@ class Recorder:
             self.counters["trades"] += 1
             return tick
         return None
+
+    def _warn_if_crossed(self, book, source: str) -> None:
+        """Crossed books (bid >= ask) produced the bogus 36% arb readings; count
+        and surface them so we can tell if the feed or our delta handling is at
+        fault. Strategy code independently refuses to act on crossed books."""
+        if not book.crossed:
+            return
+        self.counters["crossed_books"] += 1
+        if book.ts - self._last_crossed_warn.get(book.token_id, 0.0) >= 60.0:
+            self._last_crossed_warn[book.token_id] = book.ts
+            log.warning("CROSSED BOOK (%s) token=%s bid=%.3f ask=%.3f",
+                        source, book.token_id, book.best_bid, book.best_ask)
 
     # crypto feed callbacks -----------------------------------------------------
 

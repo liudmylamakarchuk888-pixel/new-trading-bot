@@ -38,6 +38,9 @@ def evaluate_market(
 
         if book is None or ba is None or bb is None:
             action, reason = "skip", "no_liquidity"
+        elif book.crossed:
+            # corrupted book state (bid >= ask): prices cannot be trusted
+            action, reason = "skip", "crossed_book"
         elif expiring:
             action, reason = "skip", "expiry_cutoff"
         elif spread is not None and spread > cfg.max_spread:
