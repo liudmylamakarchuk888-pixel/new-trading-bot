@@ -52,6 +52,10 @@ python -m app.main paper
 
 # 4. 리포트 (PnL, 승률, 엣지 분포, 차익 기회)
 python -m app.main report
+
+# 5. Sci-Fi HUD 대시보드 (브라우저에서 실시간 모니터링)
+python -m app.main dashboard
+# http://127.0.0.1:8080 — DB에 수집된 데이터를 3초마다 갱신
 ```
 
 ## 긴급 정지 (Kill Switch)

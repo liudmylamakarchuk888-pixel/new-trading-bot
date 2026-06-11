@@ -4,3 +4,5 @@ psycopg[binary]>=3.2
 pydantic>=2.7
 pydantic-settings>=2.3
 rich>=13.7
+fastapi>=0.111
+uvicorn[standard]>=0.29

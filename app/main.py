@@ -4,6 +4,7 @@
   python -m app.main backtest   # Phase 2: replay recorded data through the strategy
   python -m app.main paper      # Phase 3: live paper trading (no real orders, ever)
   python -m app.main report     # PnL / win-rate / edge / arb report
+  python -m app.main dashboard  # sci-fi HUD web dashboard
 """
 from __future__ import annotations
 
@@ -257,6 +258,9 @@ def main() -> None:
     bt.add_argument("--to", dest="t1", default=None,
                     help="end (ISO datetime or epoch), default: last recorded snapshot")
     sub.add_parser("report", help="print PnL / win-rate / edge / arb report")
+    dash = sub.add_parser("dashboard", help="launch sci-fi HUD web dashboard")
+    dash.add_argument("--host", default="127.0.0.1", help="bind address (default: 127.0.0.1)")
+    dash.add_argument("--port", type=int, default=8080, help="bind port (default: 8080)")
     args = parser.parse_args()
 
     cfg = load_settings()
@@ -277,6 +281,9 @@ def main() -> None:
         print_report(cfg)
     elif args.command == "report":
         print_report(cfg)
+    elif args.command == "dashboard":
+        from .monitoring.api import run_dashboard
+        run_dashboard(cfg, host=args.host, port=args.port)
 
 
 if __name__ == "__main__":

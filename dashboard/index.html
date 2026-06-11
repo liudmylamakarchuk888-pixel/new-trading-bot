@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>POLYMARKET BOT // HUD</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/hud.css" />
+</head>
+<body>
+  <div class="scanlines"></div>
+  <div class="hud">
+    <header class="hud-header">
+      <div class="brand">
+        <span class="crosshair">⊕</span>
+        POLYMARKET VALUE BOT
+        <span class="dim">// MISSION CONTROL</span>
+      </div>
+      <div class="header-stats" id="header-stats">
+        <span class="stat"><label>MODE</label><b id="hdr-mode">PAPER</b></span>
+        <span class="stat"><label>BANKROLL</label><b id="hdr-bankroll">—</b></span>
+        <span class="stat"><label>PNL</label><b id="hdr-pnl">—</b></span>
+        <span class="stat"><label>UPNL</label><b id="hdr-upnl">—</b></span>
+        <span class="stat alert" id="hdr-kill-wrap"><label>KILL</label><b id="hdr-kill">OFF</b></span>
+        <span class="stat"><label>SYNC</label><b id="hdr-sync">—</b></span>
+      </div>
+    </header>
+
+    <main class="grid-4">
+      <!-- Column 1: BTC -->
+      <section class="col" data-asset="BTC">
+        <div class="panel wireframe-panel">
+          <div class="panel-label">BTC // SPOT FEED</div>
+          <canvas class="wireframe" id="wf-btc" data-shape="sphere"></canvas>
+          <div class="coord-overlay" id="coord-btc">000.000 / 000.000</div>
+        </div>
+        <div class="panel telemetry" id="tel-btc"></div>
+        <div class="panel status-dots" id="dots-btc"></div>
+        <div class="panel sparkline-panel">
+          <canvas class="sparkline" id="spark-btc"></canvas>
+        </div>
+        <div class="panel readout">
+          <div class="big-num" id="price-btc">—</div>
+          <div class="sub-label">BTC/USDT SPOT</div>
+        </div>
+        <div class="panel waveform-panel">
+          <canvas class="waveform" id="wave-btc"></canvas>
+        </div>
+        <div class="panel bars-panel">
+          <div class="h-bars" id="bars-btc"></div>
+          <div class="v-bars" id="vbars-btc"></div>
+        </div>
+        <div class="panel dial-panel">
+          <div class="dial" id="dial-btc"></div>
+        </div>
+      </section>
+
+      <!-- Column 2: ETH -->
+      <section class="col" data-asset="ETH">
+        <div class="panel wireframe-panel">
+          <div class="panel-label">ETH // SPOT FEED</div>
+          <canvas class="wireframe" id="wf-eth" data-shape="ring"></canvas>
+          <div class="coord-overlay" id="coord-eth">000.000 / 000.000</div>
+        </div>
+        <div class="panel telemetry" id="tel-eth"></div>
+        <div class="panel status-dots" id="dots-eth"></div>
+        <div class="panel sparkline-panel">
+          <canvas class="sparkline" id="spark-eth"></canvas>
+        </div>
+        <div class="panel readout">
+          <div class="big-num" id="price-eth">—</div>
+          <div class="sub-label">ETH/USDT SPOT</div>
+        </div>
+        <div class="panel waveform-panel">
+          <canvas class="waveform" id="wave-eth"></canvas>
+        </div>
+        <div class="panel bars-panel">
+          <div class="h-bars" id="bars-eth"></div>
+          <div class="v-bars" id="vbars-eth"></div>
+        </div>
+        <div class="panel dial-panel">
+          <div class="dial" id="dial-eth"></div>
+        </div>
+      </section>
+
+      <!-- Column 3: Paper Trading -->
+      <section class="col" data-asset="PAPER">
+        <div class="panel wireframe-panel">
+          <div class="panel-label">PAPER // STRATEGY ENGINE</div>
+          <canvas class="wireframe" id="wf-paper" data-shape="crystal"></canvas>
+          <div class="coord-overlay" id="coord-paper">EDGE / FAIR</div>
+        </div>
+        <div class="panel telemetry" id="tel-paper"></div>
+        <div class="panel status-dots" id="dots-paper"></div>
+        <div class="panel sparkline-panel">
+          <canvas class="sparkline" id="spark-paper"></canvas>
+        </div>
+        <div class="panel readout">
+          <div class="big-num" id="price-paper">—</div>
+          <div class="sub-label">WIN RATE %</div>
+        </div>
+        <div class="panel waveform-panel">
+          <canvas class="waveform" id="wave-paper"></canvas>
+        </div>
+        <div class="panel bars-panel">
+          <div class="h-bars" id="bars-paper"></div>
+          <div class="v-bars" id="vbars-paper"></div>
+        </div>
+        <div class="panel dial-panel">
+          <div class="dial" id="dial-paper"></div>
+        </div>
+      </section>
+
+      <!-- Column 4: Command Center -->
+      <section class="col col-wide">
+        <div class="panel table-panel">
+          <div class="panel-label">DATA_CHARTS // ACTIVE MARKETS</div>
+          <div class="table-wrap">
+            <table class="data-table" id="markets-table">
+              <thead>
+                <tr>
+                  <th>ASSET</th>
+                  <th>STRIKE</th>
+                  <th>YES</th>
+                  <th>NO</th>
+                  <th>TTL</th>
+                  <th>MARKET</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="panel network-panel">
+          <div class="panel-label">DATA_CHARTS // MARKET FLOW</div>
+          <canvas class="network-canvas" id="network"></canvas>
+        </div>
+
+        <div class="panel alert-strip" id="alert-strip"></div>
+
+        <div class="panel gauges-panel">
+          <div class="panel-label">RISK // SYSTEM LEVELS</div>
+          <div class="gauges" id="gauges"></div>
+        </div>
+
+        <div class="panel split-bottom">
+          <div class="signals-panel">
+            <div class="panel-label">SIGNAL FEED</div>
+            <div class="table-wrap short">
+              <table class="data-table compact" id="signals-table">
+                <thead>
+                  <tr><th>ACT</th><th>EDGE</th><th>SIDE</th><th>MARKET</th></tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </div>
+          <div class="arb-panel">
+            <div class="panel-label">ARB SCANNER</div>
+            <div class="table-wrap short">
+              <table class="data-table compact" id="arb-table">
+                <thead>
+                  <tr><th>EDGE</th><th>Y/N</th><th>STS</th><th>MARKET</th></tr>
+                </thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        <div class="panel timeline-panel">
+          <canvas class="timeline" id="timeline"></canvas>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
+  <script src="/static/hud.js"></script>
+</body>
+</html>
