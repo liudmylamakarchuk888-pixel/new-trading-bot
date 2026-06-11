@@ -4,12 +4,57 @@ from __future__ import annotations
 import logging
 import time
 
+from datetime import datetime, timezone
+
 from ..config import Settings
 from ..storage.db import connect_sync
 from ..storage.models import Market
 from .settlement import resolve_outcome
 
 log = logging.getLogger(__name__)
+
+
+def _diagnose(conn, mode: str, grace: float, now: float) -> dict:
+    """Break down why settle-paper may find nothing to settle."""
+    row = conn.execute(
+        """SELECT COUNT(DISTINCT f.token_id) AS open_tokens,
+                  COUNT(DISTINCT f.condition_id) AS open_markets
+           FROM paper_fills f
+           WHERE f.mode = %s
+             AND f.token_id NOT IN (
+                 SELECT token_id FROM paper_settlements WHERE mode = %s)""",
+        (mode, mode),
+    ).fetchone()
+    row2 = conn.execute(
+        """WITH open_pos AS (
+               SELECT DISTINCT f.condition_id
+               FROM paper_fills f
+               WHERE f.mode = %s
+                 AND f.token_id NOT IN (
+                     SELECT token_id FROM paper_settlements WHERE mode = %s)
+           )
+           SELECT
+               COUNT(*) AS open_market_rows,
+               SUM(CASE WHEN m.condition_id IS NULL THEN 1 ELSE 0 END) AS missing_market_row,
+               SUM(CASE WHEN m.end_ts IS NULL AND m.condition_id IS NOT NULL THEN 1 ELSE 0 END) AS null_end_ts,
+               SUM(CASE WHEN m.end_ts IS NOT NULL AND m.end_ts + %s <= %s THEN 1 ELSE 0 END) AS expired,
+               SUM(CASE WHEN m.end_ts IS NOT NULL AND m.end_ts + %s > %s THEN 1 ELSE 0 END) AS not_expired,
+               MIN(m.end_ts) AS min_end_ts,
+               MAX(m.end_ts) AS max_end_ts
+           FROM open_pos p
+           LEFT JOIN markets m ON m.condition_id = p.condition_id""",
+        (mode, mode, grace, now, grace, now),
+    ).fetchone()
+    return {
+        "open_tokens": row["open_tokens"] or 0,
+        "open_markets": row["open_markets"] or 0,
+        "markets_missing_row": row2["missing_market_row"] or 0,
+        "markets_null_end_ts": row2["null_end_ts"] or 0,
+        "markets_expired": row2["expired"] or 0,
+        "markets_not_expired": row2["not_expired"] or 0,
+        "min_end_ts": row2["min_end_ts"],
+        "max_end_ts": row2["max_end_ts"],
+    }
 
 
 def _spot_at_expiry(conn, asset: str, end_ts: float) -> float | None:
@@ -55,7 +100,25 @@ def settle_open_positions(
             (mode, mode, grace, now),
         ).fetchall()
         if not rows:
-            return {"markets": 0, "positions": 0, "pnl": 0.0, "skipped": 0}
+            diag = _diagnose(conn, mode, grace, now)
+            if diag["open_tokens"]:
+                min_end = diag["min_end_ts"]
+                max_end = diag["max_end_ts"]
+                log.info(
+                    "settle-paper: nothing eligible — %d open tokens across %d markets "
+                    "(%d expired, %d not expired yet, %d missing markets row); "
+                    "end_ts range %s .. %s (now=%s, grace=%.0fs)",
+                    diag["open_tokens"], diag["open_markets"],
+                    diag["markets_expired"], diag["markets_not_expired"],
+                    diag["markets_missing_row"],
+                    datetime.fromtimestamp(min_end, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
+                    if min_end else "-",
+                    datetime.fromtimestamp(max_end, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
+                    if max_end else "-",
+                    datetime.fromtimestamp(now, tz=timezone.utc).strftime("%Y-%m-%d %H:%M"),
+                    grace,
+                )
+            return {"markets": 0, "positions": 0, "pnl": 0.0, "skipped": 0, **diag}
 
         by_market: dict[str, list] = {}
         meta: dict[str, dict] = {}
