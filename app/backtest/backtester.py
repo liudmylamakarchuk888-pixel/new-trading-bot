@@ -18,6 +18,7 @@ import time
 from ..config import Settings
 from ..data.recorder import DataHub
 from ..paper.paper_engine import StrategyEngine
+from ..paper.settlement import resolve_outcome
 from ..risk.risk_engine import RiskEngine
 from ..storage.db import Sink, connect_sync
 from ..storage.models import Candle, Market, OrderBook, TradeTick
@@ -188,15 +189,11 @@ class Backtester:
 
     def _settle(self, engine: StrategyEngine, hub: DataHub, m: Market,
                 last_spot: dict[str, float], now: float) -> None:
-        outcome = m.outcome
+        spot = last_spot.get(m.asset)
+        outcome = resolve_outcome(m, spot)
         if outcome is None:
-            spot = last_spot.get(m.asset)
-            if spot is None:
-                # no spot data: cancel this market's orders, drop it unsettled
-                engine.cancel_market_orders(m.condition_id, now, "market_closed")
-                hub.remove_market(m.condition_id)
-                return
-            hit = spot >= m.strike if m.direction == "above" else spot <= m.strike
-            outcome = 1.0 if hit else 0.0
+            engine.cancel_market_orders(m.condition_id, now, "market_closed")
+            hub.remove_market(m.condition_id)
+            return
         engine.settle_market(m, outcome, now)
         hub.remove_market(m.condition_id)

@@ -37,6 +37,12 @@ class Settings(BaseSettings):
     replace_edge_threshold: float = 0.01  # replace only if |fair-old| >= this
     expiry_taper_min: float = 15.0        # halve order size this close to expiry
     expiry_cancel_min: float = 2.0        # cancel all open orders this close to expiry
+    zero_fill_cancel_limit: int = 25      # consecutive zero-fill cancels -> market cooldown
+    zero_fill_cooldown_s: float = 3600.0  # stop quoting a market for this long
+
+    # paper settlement (Gamma is preferred; fallback matches backtest)
+    paper_settle_fallback: bool = True
+    paper_settle_grace_s: float = 300.0   # wait after expiry before spot fallback
 
     # quote placement: conservative (default) | join_bid | improve_tick (fill test)
     quote_mode: str = "conservative"

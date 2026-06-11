@@ -25,6 +25,7 @@ from ..strategy import arbitrage
 from ..strategy.edge_detector import evaluate_market, maker_price
 from ..strategy.fair_price import annualized_vol, fair_yes_probability
 from .position_manager import PositionManager
+from .settlement import ZERO_FILL_EXCLUDE_CANCEL
 
 log = logging.getLogger(__name__)
 
@@ -109,6 +110,8 @@ class StrategyEngine:
         self._arb_log: dict[tuple[str, str], float] = {}    # (condition_id, status) -> last persist ts
         self._cooldown: dict[str, float] = {}               # token_id -> last non-replace cancel ts
         self._market_cooldown: dict[str, float] = {}        # condition_id -> last new order ts
+        self._zero_fill_count: dict[str, int] = {}         # condition_id -> consecutive zero-fill cancels
+        self._zero_fill_ban: dict[str, float] = {}          # condition_id -> banned until ts
         self._kill_logged = False
         self.stats = {"orders": 0, "fills": 0, "settlements": 0, "arbs": 0}
 
@@ -117,17 +120,27 @@ class StrategyEngine:
     def evaluate(self, now: float) -> None:
         if kill_switch.is_active(self.cfg.kill_switch_file):
             if not self._kill_logged:
-                log.warning("KILL SWITCH active: cancelling all paper orders, no new entries")
+                reason = kill_switch.read_reason(self.cfg.kill_switch_file)
+                n_open = sum(1 for o in self.broker.orders.values() if o.status == "open")
+                detail = f": {reason}" if reason else ""
+                log.warning(
+                    "KILL SWITCH active (%s%s): cancelling %d open orders, no new entries",
+                    self.cfg.kill_switch_file, detail, n_open,
+                )
                 self._kill_logged = True
             self.cancel_all(now, "kill_switch")
             return
-        self._kill_logged = False
+        if self._kill_logged:
+            log.info("KILL SWITCH cleared (%s): resuming paper trading", self.cfg.kill_switch_file)
+            self._kill_logged = False
 
         vol_cache: dict[str, float | None] = {}
         for market in list(self.hub.markets.values()):
             if market.closed or (market.end_ts - now) <= self.cfg.expiry_cancel_s:
                 # too close to expiry (or already done): flatten open orders, stop quoting
                 self.cancel_market_orders(market.condition_id, now, "market_expiry")
+                continue
+            if now < self._zero_fill_ban.get(market.condition_id, 0.0):
                 continue
             spot = self.hub.spot.get(market.asset)
             if spot is None or now - spot[0] > self.cfg.max_spot_age_s:
@@ -214,6 +227,9 @@ class StrategyEngine:
             if now - self._market_cooldown.get(market.condition_id, 0.0) < self.cfg.market_cooldown_s:
                 self._persist_skip(sig, now, "market_cooldown")
                 return
+            if now < self._zero_fill_ban.get(market.condition_id, 0.0):
+                self._persist_skip(sig, now, "zero_fill_cooldown")
+                return
 
         exposure = (self.positions.exposure_usd(market.condition_id)
                     + self.broker.open_value_usd(market.condition_id))
@@ -280,6 +296,8 @@ class StrategyEngine:
             order.filled = min(order.size, order.filled + qty)
             self.sink.fill(order, now, price, qty)
             self.positions.on_fill(order.condition_id, order.token_id, order.label, price, qty)
+            self._zero_fill_count[order.condition_id] = 0
+            self._zero_fill_ban.pop(order.condition_id, None)
             self.stats["fills"] += 1
             if order.remaining <= EPS:
                 order.status = "filled"
@@ -298,6 +316,18 @@ class StrategyEngine:
         self.broker.remove(order)
         if reason != "replace":
             self._cooldown[order.token_id] = now
+        if (reason not in ZERO_FILL_EXCLUDE_CANCEL
+                and order.filled <= EPS):
+            cid = order.condition_id
+            streak = self._zero_fill_count.get(cid, 0) + 1
+            self._zero_fill_count[cid] = streak
+            if streak >= self.cfg.zero_fill_cancel_limit:
+                until = now + self.cfg.zero_fill_cooldown_s
+                self._zero_fill_ban[cid] = until
+                log.warning(
+                    "zero-fill cooldown: %s after %d cancels (banned %.0f min)",
+                    cid[:12], streak, self.cfg.zero_fill_cooldown_s / 60.0,
+                )
 
     def cancel_all(self, now: float, reason: str) -> None:
         for order in list(self.broker.orders.values()):

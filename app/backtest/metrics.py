@@ -266,9 +266,46 @@ def print_report(cfg: Settings) -> None:
         _print_collected(console, conn)
         for mode in ("paper", "backtest"):
             _print_mode(console, conn, mode)
+        _print_comparison(console, conn)
         _print_arb(console, conn)
     finally:
         conn.close()
+
+
+def _print_comparison(console: Console, conn: psycopg.Connection) -> None:
+    paper = mode_summary(conn, "paper")
+    back = mode_summary(conn, "backtest")
+    if paper["orders"] == 0 and back["orders"] == 0:
+        return
+    t = Table(title="paper vs backtest (key metrics)")
+    t.add_column("metric")
+    t.add_column("paper", justify="right")
+    t.add_column("backtest", justify="right")
+    rows = [
+        ("settlements", str(paper["settlements"]), str(back["settlements"])),
+        ("win rate",
+         f"{paper['win_rate']:.1f}%" if paper["settlements"] else "-",
+         f"{back['win_rate']:.1f}%" if back["settlements"] else "-"),
+        ("realized PnL", f"${paper['pnl']:+.2f}", f"${back['pnl']:+.2f}"),
+        ("fill rate",
+         f"{paper['orders_any_fill'] / paper['orders'] * 100:.1f}%" if paper["orders"] else "-",
+         f"{back['orders_any_fill'] / back['orders'] * 100:.1f}%" if back["orders"] else "-"),
+        ("orders / min",
+         f"{paper['orders_per_min']:.2f}" if paper["orders_per_min"] else "-",
+         f"{back['orders_per_min']:.2f}" if back["orders_per_min"] else "-"),
+        ("open positions", str(paper.get("open_positions", 0)), str(back.get("open_positions", 0))),
+        ("unrealized PnL",
+         f"${paper.get('unrealized_pnl', 0):+.2f}" if paper.get("open_positions") else "-",
+         f"${back.get('unrealized_pnl', 0):+.2f}" if back.get("open_positions") else "-"),
+    ]
+    for label, p, b in rows:
+        t.add_row(label, p, b)
+    console.print(t)
+    if paper["settlements"] == 0 and paper.get("open_positions", 0) > 0:
+        console.print(
+            "[dim]paper has open positions but no settlements — run "
+            "`python -m app.main settle-paper` or wait for Gamma resolution[/dim]"
+        )
 
 
 def _print_collected(console: Console, conn: psycopg.Connection) -> None:

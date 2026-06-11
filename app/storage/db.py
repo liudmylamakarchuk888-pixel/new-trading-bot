@@ -249,21 +249,37 @@ class Sink:
     # matters when the database is remote (VPS).
 
     def flush_sync(self, conn: psycopg.Connection) -> int:
-        rows = self.drain()
-        if not rows:
+        if not self._rows:
             return 0
-        with conn.pipeline():
-            for sql, params in rows:
-                conn.execute(sql, params)
-        conn.commit()
+        rows = self.drain()
+        try:
+            with conn.pipeline():
+                for sql, params in rows:
+                    conn.execute(sql, params)
+            conn.commit()
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            self._rows = rows + self._rows
+            raise
         return len(rows)
 
     async def flush_async(self, conn: psycopg.AsyncConnection) -> int:
-        rows = self.drain()
-        if not rows:
+        if not self._rows:
             return 0
-        async with conn.pipeline():
-            for sql, params in rows:
-                await conn.execute(sql, params)
-        await conn.commit()
+        rows = self.drain()
+        try:
+            async with conn.pipeline():
+                for sql, params in rows:
+                    await conn.execute(sql, params)
+            await conn.commit()
+        except Exception:
+            try:
+                await conn.rollback()
+            except Exception:
+                pass
+            self._rows = rows + self._rows
+            raise
         return len(rows)

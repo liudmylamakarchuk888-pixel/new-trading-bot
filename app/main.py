@@ -4,6 +4,7 @@
   python -m app.main backtest   # Phase 2: replay recorded data through the strategy
   python -m app.main paper      # Phase 3: live paper trading (no real orders, ever)
   python -m app.main report     # PnL / win-rate / edge / arb report
+  python -m app.main settle-paper  # batch-settle expired paper positions
   python -m app.main dashboard  # sci-fi HUD web dashboard
 """
 from __future__ import annotations
@@ -26,6 +27,9 @@ from .data.clob_websocket import MarketWebSocket
 from .data.crypto_feed import CryptoFeed
 from .data.recorder import DataHub, Recorder
 from .paper.paper_engine import StrategyEngine
+from .paper.batch_settle import settle_open_positions
+from .paper.settlement import resolve_outcome
+from .risk import kill_switch
 from .risk.risk_engine import RiskEngine
 from .storage.db import Sink, connect_async, connect_sync
 from .storage.models import Market, OrderBook, TradeTick
@@ -96,6 +100,7 @@ class LiveRunner:
             cid for cid, m in self.hub.markets.items()
             if not m.closed and (m.end_ts < now or cid not in fresh_ids)
         ]
+        settled_ids: set[str] = set()
         if stale:
             raw = await gamma_client.fetch_markets_by_condition(self._http, stale)
             for cid, rm in raw.items():
@@ -105,7 +110,7 @@ class LiveRunner:
                 outcome = gamma_client._parse_outcome(rm)
                 if outcome is None:
                     continue
-                log.info("market resolved: %s -> YES=%.2f", m.question[:70], outcome)
+                log.info("market resolved (gamma): %s -> YES=%.2f", m.question[:70], outcome)
                 if self.engine is not None:
                     self.engine.settle_market(m, outcome, now)
                 else:
@@ -113,6 +118,34 @@ class LiveRunner:
                     m.outcome = outcome
                     self.sink.market(m, now)
                 self.hub.remove_market(cid)
+                settled_ids.add(cid)
+
+            if self.engine is not None and self.cfg.paper_settle_fallback:
+                for cid in stale:
+                    if cid in settled_ids:
+                        continue
+                    m = self.hub.markets.get(cid)
+                    if m is None or m.closed:
+                        continue
+                    if now < m.end_ts + self.cfg.paper_settle_grace_s:
+                        continue
+                    spot = self.hub.spot.get(m.asset)
+                    spot_price = spot[1] if spot is not None else None
+                    outcome = resolve_outcome(m, spot_price)
+                    if outcome is None:
+                        log.warning(
+                            "unsettled expired market (no gamma/spot): %s ends %s",
+                            m.question[:60],
+                            datetime.fromtimestamp(m.end_ts, tz=timezone.utc).strftime("%m-%d %H:%M"),
+                        )
+                        continue
+                    src = "recorded" if m.outcome is not None else f"spot={spot_price:,.0f}"
+                    log.info(
+                        "market settled (fallback/%s): %s -> YES=%.2f",
+                        src, m.question[:70], outcome,
+                    )
+                    self.engine.settle_market(m, outcome, now)
+                    self.hub.remove_market(cid)
 
         self.ws.set_assets(self.hub.tracked_tokens())
 
@@ -140,7 +173,16 @@ class LiveRunner:
             try:
                 await self.sink.flush_async(self._db)
             except Exception:
-                log.exception("db flush failed")
+                log.exception("db flush failed (%d rows buffered)", len(self.sink))
+                try:
+                    await self._db.rollback()
+                except Exception:
+                    log.warning("db rollback failed, reconnecting")
+                    try:
+                        await self._db.close()
+                    except Exception:
+                        pass
+                    self._db = await connect_async(self.cfg.database_url)
 
     async def _eval_loop(self) -> None:
         while True:
@@ -169,6 +211,8 @@ class LiveRunner:
                              f"uPnL=${u.total_unrealized_pnl:+.2f}")
                 if self.engine.risk.halted_reason:
                     line += f" [HALTED: {self.engine.risk.halted_reason}]"
+                if kill_switch.is_active(self.cfg.kill_switch_file):
+                    line += " [KILL_SWITCH]"
             log.info(line)
 
     # ---- entry ----------------------------------------------------------------------
@@ -258,6 +302,10 @@ def main() -> None:
     bt.add_argument("--to", dest="t1", default=None,
                     help="end (ISO datetime or epoch), default: last recorded snapshot")
     sub.add_parser("report", help="print PnL / win-rate / edge / arb report")
+    st = sub.add_parser("settle-paper", help="batch-settle expired paper positions (spot/outcome fallback)")
+    st.add_argument("--dry-run", action="store_true", help="show what would settle without writing")
+    st.add_argument("--force", action="store_true",
+                    help="ignore paper_settle_grace_s (settle as soon as end_ts passed)")
     dash = sub.add_parser("dashboard", help="launch sci-fi HUD web dashboard")
     dash.add_argument("--host", default="127.0.0.1", help="bind address (default: 127.0.0.1)")
     dash.add_argument("--port", type=int, default=8080, help="bind port (default: 8080)")
@@ -281,6 +329,11 @@ def main() -> None:
         print_report(cfg)
     elif args.command == "report":
         print_report(cfg)
+    elif args.command == "settle-paper":
+        result = settle_open_positions(cfg, mode="paper", dry_run=args.dry_run, force=args.force)
+        log.info("settle-paper: %s", result)
+        if not args.dry_run and result["positions"]:
+            print_report(cfg)
     elif args.command == "dashboard":
         from .monitoring.api import run_dashboard
         run_dashboard(cfg, host=args.host, port=args.port)

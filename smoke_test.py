@@ -15,6 +15,7 @@ import logging
 from app.config import load_settings
 from app.data.gamma_client import parse_gamma_market, parse_question
 from app.paper.position_manager import PositionManager
+from app.paper.settlement import outcome_from_spot, resolve_outcome
 from app.data.recorder import DataHub
 from app.paper.paper_engine import StrategyEngine
 from app.risk.risk_engine import RiskEngine
@@ -87,7 +88,60 @@ mp = maker_price(0.56, 0.50, 0.52, cfg)
 check("maker price improves bid, stays under ask", mp == 0.51)
 check("maker never crosses cap", maker_price(0.52, 0.50, 0.52, cfg) == 0.48)
 
-# --- paper engine end-to-end (synthetic) -------------------------------------------
+# --- settlement helpers (no DB) -------------------------------------------------
+m_settle = Market("0xset", "Will Bitcoin be above $100,000 today?", "slug", "BTC",
+                  100000.0, "above", now + 3600, "YS", "NS")
+check("outcome above strike", outcome_from_spot(m_settle, 100500.0) == 1.0)
+check("outcome below strike", outcome_from_spot(m_settle, 99500.0) == 0.0)
+check("resolve prefers recorded outcome", resolve_outcome(
+    Market("0x", "", "", "BTC", 100000.0, "above", now, "YS", "NS", outcome=0.0),
+    100500.0) == 0.0)
+
+# --- zero-fill market cooldown (no DB) -------------------------------------------
+cfg_zf = load_settings()
+cfg_zf.zero_fill_cancel_limit = 2
+cfg_zf.zero_fill_cooldown_s = 600.0
+cfg_zf.order_cooldown_s = 0.0
+cfg_zf.market_cooldown_s = 0.0
+hub_zf = DataHub()
+eng_zf = StrategyEngine(cfg_zf, hub_zf, Sink(mode="backtest"), RiskEngine(cfg_zf), mode="backtest")
+m_zf = Market("0xzf", "Will Bitcoin be above $100,000 today?", "slug", "BTC",
+              100000.0, "above", now + 3600, "YZF", "NZF")
+hub_zf.update_market(m_zf)
+hub_zf.set_spot("BTC", now, 100500.0)
+for i, c in enumerate(closes):
+    hub_zf.add_candle(Candle("BTC", now - (len(closes) - i) * 60, c, c, c, c, 1.0))
+hub_zf.set_book(OrderBook("YZF", now, bids=[(0.50, 100)], asks=[(0.52, 100)]))
+hub_zf.set_book(OrderBook("NZF", now, bids=[(0.46, 100)], asks=[(0.48, 100)]))
+eng_zf.evaluate(now)
+ord_zf = eng_zf.broker.order_for_token("YZF")
+check("zero-fill test order placed", ord_zf is not None)
+if ord_zf:
+    eng_zf._cancel(ord_zf, now + 1, "edge_dropped")
+    eng_zf.evaluate(now + 2)
+    ord_zf = eng_zf.broker.order_for_token("YZF")
+    check("second order after one cancel", ord_zf is not None)
+    if ord_zf:
+        eng_zf._cancel(ord_zf, now + 3, "edge_dropped")
+        check("zero-fill ban set", eng_zf._zero_fill_ban.get("0xzf", 0) > now)
+        eng_zf.evaluate(now + 4)
+        check("banned market gets no new order", eng_zf.broker.order_for_token("YZF") is None)
+
+hub_zf2 = DataHub()
+eng_zf2 = StrategyEngine(cfg_zf, hub_zf2, Sink(mode="backtest"), RiskEngine(cfg_zf), mode="backtest")
+hub_zf2.update_market(m_zf)
+hub_zf2.set_spot("BTC", now, 100500.0)
+for i, c in enumerate(closes):
+    hub_zf2.add_candle(Candle("BTC", now - (len(closes) - i) * 60, c, c, c, c, 1.0))
+hub_zf2.set_book(OrderBook("YZF", now, bids=[(0.50, 100)], asks=[(0.52, 100)]))
+eng_zf2.evaluate(now)
+ord_rep = eng_zf2.broker.order_for_token("YZF")
+if ord_rep:
+    eng_zf2._cancel(ord_rep, now + 1, "replace")
+    check("replace does not increment zero-fill streak",
+          eng_zf2._zero_fill_count.get("0xzf", 0) == 0)
+
+# --- paper engine end-to-end (synthetic, needs PostgreSQL) --------------------
 conn = connect_sync(cfg.database_url)
 for _table in ("signals", "paper_orders", "paper_fills", "paper_settlements"):
     conn.execute(f"DELETE FROM {_table} WHERE mode='backtest'")

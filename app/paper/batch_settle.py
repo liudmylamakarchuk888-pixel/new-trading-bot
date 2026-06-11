@@ -1,0 +1,131 @@
+"""Batch-settle open paper/backtest positions from DB using outcome or spot fallback."""
+from __future__ import annotations
+
+import logging
+import time
+
+from ..config import Settings
+from ..storage.db import connect_sync
+from ..storage.models import Market
+from .settlement import resolve_outcome
+
+log = logging.getLogger(__name__)
+
+
+def _spot_at_expiry(conn, asset: str, end_ts: float) -> float | None:
+    row = conn.execute(
+        "SELECT price FROM crypto_prices WHERE symbol=%s AND ts <= %s "
+        "ORDER BY ts DESC LIMIT 1",
+        (asset, end_ts),
+    ).fetchone()
+    return row["price"] if row else None
+
+
+def settle_open_positions(
+    cfg: Settings,
+    mode: str = "paper",
+    *,
+    dry_run: bool = False,
+    force: bool = False,
+) -> dict:
+    """Insert settlements for expired markets that still have open fill positions."""
+    conn = connect_sync(cfg.database_url)
+    now = time.time()
+    grace = 0.0 if force else cfg.paper_settle_grace_s
+    try:
+        rows = conn.execute(
+            """WITH open_pos AS (
+                   SELECT f.token_id, f.condition_id, o.label,
+                          SUM(f.size) AS size,
+                          SUM(f.price * f.size) / NULLIF(SUM(f.size), 0) AS avg_price
+                   FROM paper_fills f
+                   JOIN paper_orders o ON o.id = f.order_id
+                   WHERE f.mode = %s
+                     AND f.token_id NOT IN (
+                         SELECT token_id FROM paper_settlements WHERE mode = %s)
+                   GROUP BY f.token_id, f.condition_id, o.label
+               )
+               SELECT p.token_id, p.condition_id, p.label, p.size, p.avg_price,
+                      m.question, m.asset, m.strike, m.direction, m.end_ts,
+                      m.outcome, m.yes_token_id, m.no_token_id
+               FROM open_pos p
+               JOIN markets m ON m.condition_id = p.condition_id
+               WHERE m.end_ts + %s <= %s
+               ORDER BY m.end_ts, p.token_id""",
+            (mode, mode, grace, now),
+        ).fetchall()
+        if not rows:
+            return {"markets": 0, "positions": 0, "pnl": 0.0, "skipped": 0}
+
+        by_market: dict[str, list] = {}
+        meta: dict[str, dict] = {}
+        for r in rows:
+            cid = r["condition_id"]
+            by_market.setdefault(cid, []).append(r)
+            meta[cid] = r
+
+        markets_settled = positions_settled = skipped = 0
+        total_pnl = 0.0
+        for cid, positions in by_market.items():
+            mrow = meta[cid]
+            market = Market(
+                condition_id=cid,
+                question=mrow["question"] or "",
+                slug="",
+                asset=mrow["asset"],
+                strike=mrow["strike"],
+                direction=mrow["direction"],
+                end_ts=mrow["end_ts"],
+                yes_token_id=mrow["yes_token_id"],
+                no_token_id=mrow["no_token_id"],
+                outcome=mrow["outcome"],
+            )
+            spot = _spot_at_expiry(conn, market.asset, market.end_ts)
+            outcome = resolve_outcome(market, spot)
+            if outcome is None:
+                skipped += 1
+                log.warning(
+                    "skip settle %s: no outcome and no spot at expiry (asset=%s end=%.0f)",
+                    (market.question or cid)[:60], market.asset, market.end_ts,
+                )
+                continue
+
+            market_pnl = 0.0
+            for pos in positions:
+                payout = outcome if pos["token_id"] == market.yes_token_id else 1.0 - outcome
+                pnl = pos["size"] * (payout - pos["avg_price"])
+                market_pnl += pnl
+                if not dry_run:
+                    conn.execute(
+                        """INSERT INTO paper_settlements
+                           (ts, condition_id, token_id, label, size, avg_price, payout, pnl, mode)
+                           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                        (now, cid, pos["token_id"], pos["label"], pos["size"],
+                         pos["avg_price"], payout, pnl, mode),
+                    )
+                positions_settled += 1
+
+            if not dry_run:
+                conn.execute(
+                    "UPDATE markets SET closed=1, outcome=%s, last_seen=%s WHERE condition_id=%s",
+                    (outcome, now, cid),
+                )
+            markets_settled += 1
+            total_pnl += market_pnl
+            src = "recorded" if mrow["outcome"] is not None else f"spot={spot:,.0f}"
+            log.info(
+                "batch settle %s -> YES=%.2f (%s) pnl=%+.2f (%d positions)",
+                (market.question or cid)[:60], outcome, src, market_pnl, len(positions),
+            )
+
+        if not dry_run:
+            conn.commit()
+        return {
+            "markets": markets_settled,
+            "positions": positions_settled,
+            "pnl": total_pnl,
+            "skipped": skipped,
+            "dry_run": dry_run,
+        }
+    finally:
+        conn.close()
