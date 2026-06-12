@@ -9,6 +9,7 @@ from rich.table import Table
 
 from ..config import Settings
 from ..storage.db import connect_sync
+from .calibration import calibration_by_tte, enrich_fills, fill_quality_summary
 
 
 def _fmt_ts(ts: float | None) -> str:
@@ -267,6 +268,7 @@ def print_report(cfg: Settings) -> None:
         for mode in ("paper", "backtest"):
             _print_mode(console, conn, mode)
         _print_comparison(console, conn)
+        _print_calibration(console, conn, cfg)
         _print_arb(console, conn)
     finally:
         conn.close()
@@ -447,6 +449,59 @@ def _print_mode(console: Console, conn: psycopg.Connection, mode: str) -> None:
         for reason, n in reasons:
             t.add_row(reason, str(n))
         console.print(t)
+
+
+def _print_calibration(console: Console, conn: psycopg.Connection, cfg: Settings) -> None:
+    """Fair-at-fill vs entry fair, TTE settlement buckets, and adverse-selection stats."""
+    for mode in ("paper", "backtest"):
+        fills = enrich_fills(conn, cfg, mode)
+        if not fills:
+            continue
+
+        fq = fill_quality_summary(fills, cfg)
+        t = Table(title=f"{mode} fill quality (adverse selection)")
+        t.add_column("metric")
+        t.add_column("value", justify="right")
+        t.add_row("fills analyzed", str(fq["fills"]))
+        t.add_row("with fair at fill", str(fq["with_fair"]))
+        if fq["avg_entry_edge"] is not None:
+            t.add_row("avg entry edge (signal)", f"{fq['avg_entry_edge']*100:+.2f}%")
+        if fq["avg_fill_edge"] is not None:
+            t.add_row("avg fill edge (fair - price - cost)", f"{fq['avg_fill_edge']*100:+.2f}%")
+        if fq["avg_fair_drift"] is not None:
+            t.add_row("avg fair drift (fill - entry)", f"{fq['avg_fair_drift']*100:+.2f}%")
+        if fq["avg_price_vs_fair"] is not None:
+            t.add_row("avg fair - fill price", f"{fq['avg_price_vs_fair']*100:+.2f}%")
+        for mins, key in ((5, "adverse_5m_pct"), (15, "adverse_15m_pct"), (30, "adverse_30m_pct")):
+            if fq[key] is not None:
+                t.add_row(f"adverse spot move @ {mins}m", f"{fq[key]:.1f}%")
+        for mins, key in ((5, "avg_fav_spot_5m"), (15, "avg_fav_spot_15m"), (30, "avg_fav_spot_30m")):
+            if fq[key] is not None:
+                t.add_row(f"avg favorable spot @ {mins}m", f"{fq[key]*100:+.3f}%")
+        console.print(t)
+        console.print(
+            "[dim]adverse = spot moved against your side; favorable spot is signed "
+            "(positive helps YES-on-above / NO-on-below when spot rises)[/dim]"
+        )
+
+        buckets = calibration_by_tte(fills)
+        if buckets:
+            t = Table(title=f"{mode} settled fills by time-to-expiry at fill")
+            t.add_column("TTE at fill")
+            t.add_column("fills", justify="right")
+            t.add_column("win rate", justify="right")
+            t.add_column("realized PnL", justify="right")
+            t.add_column("entry edge", justify="right")
+            t.add_column("fill edge", justify="right")
+            t.add_column("fair drift", justify="right")
+            for b in buckets:
+                t.add_row(
+                    b["tte"], str(b["fills"]), f"{b['win_rate']:.0f}%", f"${b['pnl']:+.2f}",
+                    f"{b['avg_entry_edge']*100:+.2f}%" if b["avg_entry_edge"] is not None else "-",
+                    f"{b['avg_fill_edge']*100:+.2f}%" if b["avg_fill_edge"] is not None else "-",
+                    f"{b['avg_fair_drift']*100:+.2f}%" if b["avg_fair_drift"] is not None else "-",
+                )
+            console.print(t)
 
 
 def _print_arb(console: Console, conn: psycopg.Connection) -> None:

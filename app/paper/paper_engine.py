@@ -140,6 +140,12 @@ class StrategyEngine:
                 # too close to expiry (or already done): flatten open orders, stop quoting
                 self.cancel_market_orders(market.condition_id, now, "market_expiry")
                 continue
+            tte = market.end_ts - now
+            if self.mode == "paper":
+                if self.cfg.paper_max_tte_hours > 0 and tte > self.cfg.paper_max_tte_s:
+                    continue
+                if self.cfg.paper_min_tte_hours > 0 and tte < self.cfg.paper_min_tte_s:
+                    continue
             if now < self._zero_fill_ban.get(market.condition_id, 0.0):
                 continue
             spot = self.hub.spot.get(market.asset)
@@ -293,8 +299,9 @@ class StrategyEngine:
 
     def _apply_fills(self, fills: list[tuple[PaperOrder, float, float]], now: float) -> None:
         for order, price, qty in fills:
+            fair_at_fill, spot_at_fill, tte_s = self._fill_context(order, now)
             order.filled = min(order.size, order.filled + qty)
-            self.sink.fill(order, now, price, qty)
+            self.sink.fill(order, now, price, qty, fair_at_fill, spot_at_fill, tte_s)
             self.positions.on_fill(order.condition_id, order.token_id, order.label, price, qty)
             self._zero_fill_count[order.condition_id] = 0
             self._zero_fill_ban.pop(order.condition_id, None)
@@ -306,6 +313,26 @@ class StrategyEngine:
             else:
                 self.sink.order_update(order)
             log.info("PAPER FILL %s %.0f @ %.2f (%s)", order.label, qty, price, order.id)
+
+    def _fill_context(self, order: PaperOrder, now: float) -> tuple[float | None, float | None, float | None]:
+        """Fair value, spot, and time-to-expiry at fill time (for calibration reports)."""
+        market = self.hub.markets.get(order.condition_id)
+        if market is None:
+            return None, None, None
+        tte_s = market.end_ts - now
+        spot_row = self.hub.spot.get(market.asset)
+        if spot_row is None or now - spot_row[0] > self.cfg.max_spot_age_s:
+            return None, None, tte_s
+        spot = spot_row[1]
+        sigma = annualized_vol(
+            self.hub.close_series(market.asset),
+            lam=self.cfg.vol_lambda, min_obs=self.cfg.min_vol_candles,
+        )
+        if sigma is None:
+            return None, spot, tte_s
+        fair_yes = fair_yes_probability(market, spot, sigma, now)
+        fair = fair_yes if order.label == "YES" else 1.0 - fair_yes
+        return fair, spot, tte_s
 
     # ---- lifecycle -----------------------------------------------------------------
 

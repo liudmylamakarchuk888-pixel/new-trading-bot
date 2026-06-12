@@ -20,7 +20,7 @@ class Settings(BaseSettings):
     market_refresh_s: float = 300.0
 
     # strategy
-    min_edge: float = 0.03              # enter when edge >= this (hysteresis high)
+    min_edge: float = 0.05              # enter when edge >= this (hysteresis high)
     exit_edge: float = 0.01             # keep resting order until edge drops below this
     cost: float = 0.01
     max_spread: float = 0.08
@@ -39,6 +39,10 @@ class Settings(BaseSettings):
     expiry_cancel_min: float = 2.0        # cancel all open orders this close to expiry
     zero_fill_cancel_limit: int = 25      # consecutive zero-fill cancels -> market cooldown
     zero_fill_cooldown_s: float = 3600.0  # stop quoting a market for this long
+
+    # paper universe (backtest replays all recorded markets; paper filters by TTE)
+    paper_max_tte_hours: float = 48.0   # skip markets expiring later than this
+    paper_min_tte_hours: float = 0.0    # skip markets expiring sooner (0 = expiry_cutoff only)
 
     # paper settlement (Gamma is preferred; fallback matches backtest)
     paper_settle_fallback: bool = True
@@ -68,6 +72,14 @@ class Settings(BaseSettings):
     @property
     def expiry_cutoff_s(self) -> float:
         return self.expiry_cutoff_min * 60.0
+
+    @property
+    def paper_max_tte_s(self) -> float:
+        return self.paper_max_tte_hours * 3600.0
+
+    @property
+    def paper_min_tte_s(self) -> float:
+        return self.paper_min_tte_hours * 3600.0
 
     @property
     def expiry_taper_s(self) -> float:

@@ -219,9 +219,10 @@ class LiveRunner:
 
     async def run(self) -> None:
         mode = "PAPER TRADING (no real orders)" if self.paper else "DATA COLLECTION"
-        log.info("starting %s | db=%s | bankroll=$%.0f min_edge=%.1f%%",
+        log.info("starting %s | db=%s | bankroll=$%.0f min_edge=%.1f%% paper_tte<=%.0fh",
                  mode, _redact_db_url(self.cfg.database_url),
-                 self.cfg.bankroll, self.cfg.min_edge * 100)
+                 self.cfg.bankroll, self.cfg.min_edge * 100,
+                 self.cfg.paper_max_tte_hours if self.paper else 0)
         self._db = await connect_async(self.cfg.database_url)
         self._http = httpx.AsyncClient()
         try:

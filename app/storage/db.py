@@ -90,6 +90,9 @@ CREATE TABLE IF NOT EXISTS arb_opportunities(
 
 -- migrations for databases created before these columns existed
 ALTER TABLE paper_orders ADD COLUMN IF NOT EXISTS cancel_reason TEXT;
+ALTER TABLE paper_fills ADD COLUMN IF NOT EXISTS fair_at_fill DOUBLE PRECISION;
+ALTER TABLE paper_fills ADD COLUMN IF NOT EXISTS spot_at_fill DOUBLE PRECISION;
+ALTER TABLE paper_fills ADD COLUMN IF NOT EXISTS tte_s DOUBLE PRECISION;
 ALTER TABLE arb_opportunities ADD COLUMN IF NOT EXISTS yes_token_id TEXT;
 ALTER TABLE arb_opportunities ADD COLUMN IF NOT EXISTS no_token_id TEXT;
 ALTER TABLE arb_opportunities ADD COLUMN IF NOT EXISTS yes_book_ts DOUBLE PRECISION;
@@ -218,11 +221,15 @@ class Sink:
             (o.status, o.filled, closed_ts, o.cancel_reason, o.id),
         )
 
-    def fill(self, order: PaperOrder, ts: float, price: float, size: float) -> None:
+    def fill(self, order: PaperOrder, ts: float, price: float, size: float,
+             fair_at_fill: float | None = None, spot_at_fill: float | None = None,
+             tte_s: float | None = None) -> None:
         self.add(
-            """INSERT INTO paper_fills(order_id, ts, condition_id, token_id, price, size, mode)
-               VALUES(%s,%s,%s,%s,%s,%s,%s)""",
-            (order.id, ts, order.condition_id, order.token_id, price, size, self.mode),
+            """INSERT INTO paper_fills(order_id, ts, condition_id, token_id, price, size, mode,
+                   fair_at_fill, spot_at_fill, tte_s)
+               VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+            (order.id, ts, order.condition_id, order.token_id, price, size, self.mode,
+             fair_at_fill, spot_at_fill, tte_s),
         )
 
     def settlement(self, ts: float, condition_id: str, token_id: str, label: str,

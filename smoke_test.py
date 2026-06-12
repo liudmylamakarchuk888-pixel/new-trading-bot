@@ -62,6 +62,8 @@ check("vol insufficient history -> None", annualized_vol(closes[:30], min_obs=60
 
 # --- edge detector --------------------------------------------------------------
 cfg = load_settings()
+check("default min_edge is 5%", abs(cfg.min_edge - 0.05) < 1e-9)
+cfg = cfg.model_copy(update={"min_edge": 0.03})  # strategy tests use 3% threshold
 now = time.time()
 mkt = Market("0xc1", "Will Bitcoin be above $100,000 today?", "slug", "BTC",
              100000.0, "above", now + 3600, "YT", "NT")
@@ -339,6 +341,37 @@ near_cap = cfg.bankroll * cfg.max_market_exposure_frac - cfg.bankroll * cfg.max_
 eng7.positions.on_fill("0xexp", "NT7B", "NO", 0.5, near_cap / 0.5)
 eng7.evaluate(now + 25)
 check("exposure limit blocks entry", eng7.broker.order_for_token("YT7B") is None)
+
+# --- paper TTE universe filter (paper mode only) ---------------------------------
+cfg_tte = load_settings()
+cfg_tte = cfg_tte.model_copy(update={"min_edge": 0.03, "paper_max_tte_hours": 48.0})
+hub_tte = DataHub()
+eng_tte = StrategyEngine(cfg_tte, hub_tte, Sink(mode="paper"), RiskEngine(cfg_tte), mode="paper")
+m_far = Market("0xfar", "Will Bitcoin be above $100,000 far?", "slug", "BTC",
+               100000.0, "above", now + 5 * 86400, "YTF", "NTF")
+m_near = Market("0xnear", "Will Bitcoin be above $100,000 soon?", "slug", "BTC",
+                100000.0, "above", now + 12 * 3600, "YTN", "NTN")
+for m in (m_far, m_near):
+    hub_tte.update_market(m)
+    hub_tte.set_spot("BTC", now, 100500.0)
+    for i, c in enumerate(closes):
+        hub_tte.add_candle(Candle("BTC", now - (len(closes) - i) * 60, c, c, c, c, 1.0))
+    hub_tte.set_book(OrderBook(m.yes_token_id, now, bids=[(0.50, 100)], asks=[(0.52, 100)]))
+    hub_tte.set_book(OrderBook(m.no_token_id, now, bids=[(0.46, 100)], asks=[(0.48, 100)]))
+eng_tte.evaluate(now)
+check("far market skipped (TTE > 48h)", eng_tte.broker.order_for_token("YTF") is None)
+check("near market quoted (TTE <= 48h)", eng_tte.broker.order_for_token("YTN") is not None)
+hub_bt = DataHub()
+eng_bt = StrategyEngine(cfg_tte, hub_bt, Sink(mode="backtest"), RiskEngine(cfg_tte), mode="backtest")
+for m in (m_far, m_near):
+    hub_bt.update_market(m)
+    hub_bt.set_spot("BTC", now, 100500.0)
+    for i, c in enumerate(closes):
+        hub_bt.add_candle(Candle("BTC", now - (len(closes) - i) * 60, c, c, c, c, 1.0))
+    hub_bt.set_book(OrderBook(m.yes_token_id, now, bids=[(0.50, 100)], asks=[(0.52, 100)]))
+    hub_bt.set_book(OrderBook(m.no_token_id, now, bids=[(0.46, 100)], asks=[(0.48, 100)]))
+eng_bt.evaluate(now)
+check("backtest does not apply paper TTE filter", eng_bt.broker.order_for_token("YTF") is not None)
 
 n7 = sink7.flush_sync(conn)
 check("test7 sink flushed", n7 > 0)
