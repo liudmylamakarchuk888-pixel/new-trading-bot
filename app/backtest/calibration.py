@@ -71,6 +71,7 @@ def _favorable_spot_pct(label: str, direction: str, spot0: float, spot1: float) 
 @dataclass
 class EnrichedFill:
     fill_id: int
+    token_id: str
     ts: float
     label: str
     price: float
@@ -165,6 +166,7 @@ def enrich_fills(conn: psycopg.Connection, cfg: Settings, mode: str) -> list[Enr
 
         out.append(EnrichedFill(
             fill_id=r["fill_id"],
+            token_id=r["token_id"],
             ts=ts,
             label=r["label"],
             price=r["price"],
@@ -188,10 +190,19 @@ def _avg(vals: list[float]) -> float | None:
 
 
 def calibration_by_tte(fills: list[EnrichedFill]) -> list[dict]:
-    """Settled fills grouped by time-to-expiry at fill."""
-    buckets: dict[str, list[EnrichedFill]] = {b: [] for b in TTE_LABELS}
+    """Settled tokens grouped by time-to-expiry at first fill (PnL counted once per token)."""
+    # one row per settled token: first fill sets TTE bucket; pnl is token-level
+    by_token: dict[str, EnrichedFill] = {}
     for f in fills:
-        if f.tte_bucket in buckets and f.settled:
+        if not f.settled or f.pnl is None:
+            continue
+        prev = by_token.get(f.token_id)
+        if prev is None or f.ts < prev.ts:
+            by_token[f.token_id] = f
+
+    buckets: dict[str, list[EnrichedFill]] = {b: [] for b in TTE_LABELS}
+    for f in by_token.values():
+        if f.tte_bucket in buckets:
             buckets[f.tte_bucket].append(f)
 
     out = []
@@ -199,13 +210,14 @@ def calibration_by_tte(fills: list[EnrichedFill]) -> list[dict]:
         group = buckets[label]
         if not group:
             continue
-        wins = sum(1 for f in group if f.pnl and f.pnl > 0)
+        wins = sum(1 for f in group if f.pnl > 0)
         out.append({
             "tte": label,
-            "fills": len(group),
+            "tokens": len(group),
+            "fills": sum(1 for f in fills if f.settled and f.token_id in {g.token_id for g in group}),
             "wins": wins,
             "win_rate": wins / len(group) * 100,
-            "pnl": sum(f.pnl or 0 for f in group),
+            "pnl": sum(f.pnl for f in group),
             "avg_entry_edge": _avg([f.entry_edge for f in group]),
             "avg_fill_edge": _avg([f.fill_edge for f in group if f.fill_edge is not None]),
             "avg_fair_drift": _avg([f.fair_drift for f in group if f.fair_drift is not None]),

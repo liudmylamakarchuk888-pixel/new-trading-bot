@@ -486,9 +486,9 @@ def _print_calibration(console: Console, conn: psycopg.Connection, cfg: Settings
 
         buckets = calibration_by_tte(fills)
         if buckets:
-            t = Table(title=f"{mode} settled fills by time-to-expiry at fill")
+            t = Table(title=f"{mode} settled tokens by time-to-expiry at first fill")
             t.add_column("TTE at fill")
-            t.add_column("fills", justify="right")
+            t.add_column("tokens", justify="right")
             t.add_column("win rate", justify="right")
             t.add_column("realized PnL", justify="right")
             t.add_column("entry edge", justify="right")
@@ -496,7 +496,7 @@ def _print_calibration(console: Console, conn: psycopg.Connection, cfg: Settings
             t.add_column("fair drift", justify="right")
             for b in buckets:
                 t.add_row(
-                    b["tte"], str(b["fills"]), f"{b['win_rate']:.0f}%", f"${b['pnl']:+.2f}",
+                    b["tte"], str(b["tokens"]), f"{b['win_rate']:.0f}%", f"${b['pnl']:+.2f}",
                     f"{b['avg_entry_edge']*100:+.2f}%" if b["avg_entry_edge"] is not None else "-",
                     f"{b['avg_fill_edge']*100:+.2f}%" if b["avg_fill_edge"] is not None else "-",
                     f"{b['avg_fair_drift']*100:+.2f}%" if b["avg_fair_drift"] is not None else "-",
