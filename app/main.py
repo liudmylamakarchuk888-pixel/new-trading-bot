@@ -6,6 +6,7 @@
   python -m app.main report     # PnL / win-rate / edge / arb report
   python -m app.main settle-paper  # batch-settle expired paper positions
   python -m app.main dashboard  # sci-fi HUD web dashboard
+  python -m app.main clean-db --yes  # wipe all recorded data, keep schema
 """
 from __future__ import annotations
 
@@ -31,7 +32,7 @@ from .paper.batch_settle import settle_open_positions
 from .paper.settlement import resolve_outcome
 from .risk import kill_switch
 from .risk.risk_engine import RiskEngine
-from .storage.db import Sink, connect_async, connect_sync
+from .storage.db import Sink, clean_database, connect_async, connect_sync
 from .storage.models import Market, OrderBook, TradeTick
 
 log = logging.getLogger("app")
@@ -310,6 +311,9 @@ def main() -> None:
     dash = sub.add_parser("dashboard", help="launch sci-fi HUD web dashboard")
     dash.add_argument("--host", default="127.0.0.1", help="bind address (default: 127.0.0.1)")
     dash.add_argument("--port", type=int, default=8080, help="bind port (default: 8080)")
+    cl = sub.add_parser("clean-db", help="delete all recorded data (schema kept)")
+    cl.add_argument("-y", "--yes", action="store_true",
+                    help="confirm deletion (required)")
     args = parser.parse_args()
 
     cfg = load_settings()
@@ -338,6 +342,17 @@ def main() -> None:
     elif args.command == "dashboard":
         from .monitoring.api import run_dashboard
         run_dashboard(cfg, host=args.host, port=args.port)
+    elif args.command == "clean-db":
+        if not args.yes:
+            raise SystemExit(
+                "This permanently deletes all bot data in BOT_DATABASE_URL. "
+                "Re-run with --yes to confirm.")
+        counts = clean_database(cfg.database_url)
+        removed = sum(counts.values())
+        log.info("cleaned %s: %d rows removed", _redact_db_url(cfg.database_url), removed)
+        for table, n in counts.items():
+            if n:
+                log.info("  %s: %d", table, n)
 
 
 if __name__ == "__main__":

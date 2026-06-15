@@ -100,6 +100,19 @@ ALTER TABLE arb_opportunities ADD COLUMN IF NOT EXISTS no_book_ts DOUBLE PRECISI
 ALTER TABLE arb_opportunities ADD COLUMN IF NOT EXISTS status TEXT;
 """
 
+TABLES = (
+    "markets",
+    "book_snapshots",
+    "price_ticks",
+    "crypto_prices",
+    "crypto_candles",
+    "signals",
+    "paper_orders",
+    "paper_fills",
+    "paper_settlements",
+    "arb_opportunities",
+)
+
 
 def ensure_database(database_url: str) -> None:
     """Create the target database on first run if it does not exist yet."""
@@ -137,6 +150,21 @@ async def connect_async(database_url: str) -> psycopg.AsyncConnection:
     await conn.execute(SCHEMA)
     await conn.commit()
     return conn
+
+
+def clean_database(database_url: str) -> dict[str, int]:
+    """Remove all rows from every bot table. Schema and migrations are preserved."""
+    conn = connect_sync(database_url)
+    try:
+        counts = {
+            table: conn.execute(f"SELECT COUNT(*) AS n FROM {table}").fetchone()["n"]
+            for table in TABLES
+        }
+        conn.execute(f"TRUNCATE TABLE {', '.join(TABLES)} RESTART IDENTITY")
+        conn.commit()
+        return counts
+    finally:
+        conn.close()
 
 
 class Sink:
