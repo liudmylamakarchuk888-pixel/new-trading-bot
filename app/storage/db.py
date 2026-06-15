@@ -93,6 +93,17 @@ ALTER TABLE paper_orders ADD COLUMN IF NOT EXISTS cancel_reason TEXT;
 ALTER TABLE paper_fills ADD COLUMN IF NOT EXISTS fair_at_fill DOUBLE PRECISION;
 ALTER TABLE paper_fills ADD COLUMN IF NOT EXISTS spot_at_fill DOUBLE PRECISION;
 ALTER TABLE paper_fills ADD COLUMN IF NOT EXISTS tte_s DOUBLE PRECISION;
+ALTER TABLE paper_fills ADD COLUMN IF NOT EXISTS spot_at_order DOUBLE PRECISION;
+ALTER TABLE paper_fills ADD COLUMN IF NOT EXISTS fair_at_order DOUBLE PRECISION;
+ALTER TABLE paper_fills ADD COLUMN IF NOT EXISTS spread_at_fill DOUBLE PRECISION;
+ALTER TABLE paper_fills ADD COLUMN IF NOT EXISTS order_age_s DOUBLE PRECISION;
+ALTER TABLE paper_orders ADD COLUMN IF NOT EXISTS spot_at_order DOUBLE PRECISION;
+CREATE TABLE IF NOT EXISTS paper_exits(
+    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    ts DOUBLE PRECISION, condition_id TEXT, token_id TEXT, label TEXT,
+    size DOUBLE PRECISION, avg_price DOUBLE PRECISION, exit_price DOUBLE PRECISION,
+    pnl DOUBLE PRECISION, reason TEXT, mode TEXT
+);
 ALTER TABLE arb_opportunities ADD COLUMN IF NOT EXISTS yes_token_id TEXT;
 ALTER TABLE arb_opportunities ADD COLUMN IF NOT EXISTS no_token_id TEXT;
 ALTER TABLE arb_opportunities ADD COLUMN IF NOT EXISTS yes_book_ts DOUBLE PRECISION;
@@ -110,6 +121,7 @@ TABLES = (
     "paper_orders",
     "paper_fills",
     "paper_settlements",
+    "paper_exits",
     "arb_opportunities",
 )
 
@@ -237,10 +249,10 @@ class Sink:
     def order_insert(self, o: PaperOrder) -> None:
         self.add(
             """INSERT INTO paper_orders(id, created_ts, condition_id, token_id, side, label,
-                   price, size, filled, status, fair, edge, mode)
-               VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                   price, size, filled, status, fair, edge, spot_at_order, mode)
+               VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
             (o.id, o.created_ts, o.condition_id, o.token_id, o.side, o.label,
-             o.price, o.size, o.filled, o.status, o.fair, o.edge, self.mode),
+             o.price, o.size, o.filled, o.status, o.fair, o.edge, o.spot_at_order, self.mode),
         )
 
     def order_update(self, o: PaperOrder, closed_ts: float | None = None) -> None:
@@ -251,13 +263,26 @@ class Sink:
 
     def fill(self, order: PaperOrder, ts: float, price: float, size: float,
              fair_at_fill: float | None = None, spot_at_fill: float | None = None,
-             tte_s: float | None = None) -> None:
+             tte_s: float | None = None, spot_at_order: float | None = None,
+             fair_at_order: float | None = None, spread_at_fill: float | None = None,
+             order_age_s: float | None = None) -> None:
         self.add(
             """INSERT INTO paper_fills(order_id, ts, condition_id, token_id, price, size, mode,
-                   fair_at_fill, spot_at_fill, tte_s)
-               VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                   fair_at_fill, spot_at_fill, tte_s, spot_at_order, fair_at_order,
+                   spread_at_fill, order_age_s)
+               VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
             (order.id, ts, order.condition_id, order.token_id, price, size, self.mode,
-             fair_at_fill, spot_at_fill, tte_s),
+             fair_at_fill, spot_at_fill, tte_s, spot_at_order, fair_at_order,
+             spread_at_fill, order_age_s),
+        )
+
+    def exit(self, ts: float, condition_id: str, token_id: str, label: str,
+             size: float, avg_price: float, exit_price: float, pnl: float, reason: str) -> None:
+        self.add(
+            """INSERT INTO paper_exits(ts, condition_id, token_id, label, size,
+                   avg_price, exit_price, pnl, reason, mode)
+               VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+            (ts, condition_id, token_id, label, size, avg_price, exit_price, pnl, reason, self.mode),
         )
 
     def settlement(self, ts: float, condition_id: str, token_id: str, label: str,

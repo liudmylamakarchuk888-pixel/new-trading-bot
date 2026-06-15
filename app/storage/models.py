@@ -161,7 +161,8 @@ class PaperOrder:
     status: str = "open"  # open | filled | cancelled
     fair: float = 0.0
     edge: float = 0.0
-    cancel_reason: str | None = None  # replace | edge_dropped | stale_book | market_expiry | market_closed | kill_switch | manual_shutdown | backtest_end
+    spot_at_order: float | None = None
+    cancel_reason: str | None = None  # replace | edge_dropped | stale_book | order_ttl | adverse_spot | market_expiry | ...
 
     @property
     def remaining(self) -> float:

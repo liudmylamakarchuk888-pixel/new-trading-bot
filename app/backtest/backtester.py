@@ -115,7 +115,7 @@ class Backtester:
             raise SystemExit(f"Empty backtest window: {t0} .. {t1}")
 
         # wipe previous backtest output
-        for table in ("signals", "paper_orders", "paper_fills", "paper_settlements"):
+        for table in ("signals", "paper_orders", "paper_fills", "paper_settlements", "paper_exits"):
             wconn.execute(f"DELETE FROM {table} WHERE mode=%s", (MODE,))
         wconn.commit()
 

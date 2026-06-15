@@ -107,6 +107,12 @@ def mode_summary(conn: psycopg.Connection, mode: str) -> dict:
     s["open_positions"] = upnl["open_positions"]
     s["total_exposure_usd"] = upnl["total_exposure_usd"]
     s["unrealized_pnl"] = upnl["unrealized_pnl"]
+    s["unrealized_pnl_bid"] = upnl["unrealized_pnl_bid"]
+    exit_row = conn.execute(
+        "SELECT COALESCE(SUM(pnl), 0) pnl, COUNT(*) n FROM paper_exits WHERE mode=%s",
+        (mode,)).fetchone()
+    s["exit_pnl"] = exit_row["pnl"]
+    s["exits"] = exit_row["n"]
     return s
 
 
@@ -188,7 +194,7 @@ def cancel_reasons(conn: psycopg.Connection, mode: str) -> list[tuple[str, int]]
 
 
 def unrealized_pnl(conn: psycopg.Connection, mode: str) -> dict:
-    """Open positions from fills not yet settled, marked to latest book mid."""
+    """Open positions from fills not yet settled, marked to latest book mid and best bid."""
     rows = conn.execute(
         """WITH open_pos AS (
                SELECT f.token_id, f.condition_id, o.label,
@@ -201,30 +207,34 @@ def unrealized_pnl(conn: psycopg.Connection, mode: str) -> dict:
                      SELECT token_id FROM paper_settlements WHERE mode = %s)
                GROUP BY f.token_id, f.condition_id, o.label
            ),
-           latest_mid AS (
-               SELECT DISTINCT ON (token_id) token_id, mid
+           latest_book AS (
+               SELECT DISTINCT ON (token_id) token_id, mid, best_bid
                FROM book_snapshots
                WHERE mid IS NOT NULL
                ORDER BY token_id, ts DESC
            )
            SELECT p.token_id, p.condition_id, p.label, p.size, p.avg_price,
-                  m.mid AS mark_price,
+                  m.mid AS mark_price, m.best_bid AS bid_price,
                   p.size * p.avg_price AS cost_usd,
                   p.size * m.mid AS mark_usd,
+                  p.size * m.best_bid AS bid_usd,
                   p.size * (m.mid - p.avg_price) AS unrealized_pnl,
+                  p.size * (m.best_bid - p.avg_price) AS unrealized_pnl_bid,
                   COALESCE(mk.question, p.condition_id) AS question
            FROM open_pos p
-           LEFT JOIN latest_mid m ON m.token_id = p.token_id
+           LEFT JOIN latest_book m ON m.token_id = p.token_id
            LEFT JOIN markets mk ON mk.condition_id = p.condition_id
            ORDER BY ABS(p.size * (m.mid - p.avg_price)) DESC NULLS LAST""",
         (mode, mode),
     ).fetchall()
     total_cost = sum(r["cost_usd"] or 0 for r in rows)
     total_upnl = sum(r["unrealized_pnl"] or 0 for r in rows if r["mark_price"] is not None)
+    total_upnl_bid = sum(r["unrealized_pnl_bid"] or 0 for r in rows if r["bid_price"] is not None)
     return {
         "open_positions": len(rows),
         "total_exposure_usd": total_cost,
         "unrealized_pnl": total_upnl,
+        "unrealized_pnl_bid": total_upnl_bid,
         "positions": rows,
     }
 
@@ -354,6 +364,11 @@ def _print_mode(console: Console, conn: psycopg.Connection, mode: str) -> None:
         t.add_row("open positions", str(s["open_positions"]))
         t.add_row("total exposure", f"${s['total_exposure_usd']:.2f}")
         t.add_row("unrealized PnL (mid mark)", f"${s['unrealized_pnl']:+.2f}")
+        if s.get("unrealized_pnl_bid") is not None:
+            t.add_row("unrealized PnL (best bid)", f"${s['unrealized_pnl_bid']:+.2f}")
+    if s.get("exits"):
+        t.add_row("early exits", str(s["exits"]))
+        t.add_row("exit PnL (closed)", f"${s.get('exit_pnl', 0):+.2f}")
     t.add_row("max drawdown", f"${s['max_drawdown']:.2f}")
     console.print(t)
 
@@ -362,15 +377,18 @@ def _print_mode(console: Console, conn: psycopg.Connection, mode: str) -> None:
         t = Table(title=f"{mode} open positions (unrealized)")
         t.add_column("market"); t.add_column("side")
         t.add_column("size", justify="right"); t.add_column("avg", justify="right")
-        t.add_column("mid", justify="right"); t.add_column("exposure", justify="right")
-        t.add_column("uPnL", justify="right")
+        t.add_column("mid", justify="right"); t.add_column("bid", justify="right")
+        t.add_column("exposure", justify="right")
+        t.add_column("uPnL mid", justify="right"); t.add_column("uPnL bid", justify="right")
         for r in upnl["positions"][:15]:
             t.add_row(
                 r["question"][:50], r["label"],
                 f"{r['size']:.1f}", f"{r['avg_price']:.3f}",
                 f"{r['mark_price']:.3f}" if r["mark_price"] is not None else "-",
+                f"{r['bid_price']:.3f}" if r.get("bid_price") is not None else "-",
                 f"${r['cost_usd']:.2f}",
                 f"${r['unrealized_pnl']:+.2f}" if r["unrealized_pnl"] is not None else "-",
+                f"${r['unrealized_pnl_bid']:+.2f}" if r.get("unrealized_pnl_bid") is not None else "-",
             )
         console.print(t)
 
@@ -472,11 +490,11 @@ def _print_calibration(console: Console, conn: psycopg.Connection, cfg: Settings
             t.add_row("avg fair drift (fill - entry)", f"{fq['avg_fair_drift']*100:+.2f}%")
         if fq["avg_price_vs_fair"] is not None:
             t.add_row("avg fair - fill price", f"{fq['avg_price_vs_fair']*100:+.2f}%")
-        for mins, key in ((5, "adverse_5m_pct"), (15, "adverse_15m_pct"), (30, "adverse_30m_pct")):
-            if fq[key] is not None:
+        for mins, key in ((1, "adverse_1m_pct"), (5, "adverse_5m_pct"), (15, "adverse_15m_pct"), (30, "adverse_30m_pct")):
+            if fq.get(key) is not None:
                 t.add_row(f"adverse spot move @ {mins}m", f"{fq[key]:.1f}%")
-        for mins, key in ((5, "avg_fav_spot_5m"), (15, "avg_fav_spot_15m"), (30, "avg_fav_spot_30m")):
-            if fq[key] is not None:
+        for mins, key in ((1, "avg_fav_spot_1m"), (5, "avg_fav_spot_5m"), (15, "avg_fav_spot_15m"), (30, "avg_fav_spot_30m")):
+            if fq.get(key) is not None:
                 t.add_row(f"avg favorable spot @ {mins}m", f"{fq[key]*100:+.3f}%")
         console.print(t)
         console.print(
@@ -502,6 +520,85 @@ def _print_calibration(console: Console, conn: psycopg.Connection, cfg: Settings
                     f"{b['avg_fair_drift']*100:+.2f}%" if b["avg_fair_drift"] is not None else "-",
                 )
             console.print(t)
+
+        _print_fill_breakdowns(console, fills, mode)
+
+
+def _print_fill_breakdowns(console: Console, fills, mode: str) -> None:
+    """PnL by order age, adverse move, TTE+side, and price band."""
+    from .calibration import _tte_bucket
+
+    by_token: dict[str, object] = {}
+    for f in fills:
+        if f.settled and f.pnl is not None:
+            prev = by_token.get(f.token_id)
+            if prev is None or f.ts < prev.ts:
+                by_token[f.token_id] = f
+    if not by_token:
+        return
+
+    age_buckets = {"<30s": [], "30s-2m": [], "2m-10m": [], ">10m": []}
+    for f in by_token.values():
+        age = getattr(f, "order_age_s", None)
+        if age is None:
+            continue
+        if age < 30:
+            age_buckets["<30s"].append(f.pnl)
+        elif age < 120:
+            age_buckets["30s-2m"].append(f.pnl)
+        elif age < 600:
+            age_buckets["2m-10m"].append(f.pnl)
+        else:
+            age_buckets[">10m"].append(f.pnl)
+    if any(age_buckets.values()):
+        t = Table(title=f"{mode} PnL by order age at fill")
+        t.add_column("age"); t.add_column("tokens", justify="right"); t.add_column("pnl", justify="right")
+        for label, pnls in age_buckets.items():
+            if pnls:
+                t.add_row(label, str(len(pnls)), f"${sum(pnls):+.2f}")
+        console.print(t)
+
+    adv_buckets = {"favorable": [], "adverse": []}
+    for f in by_token.values():
+        adv = f.spot_horizons.get(5)
+        if adv is None:
+            continue
+        (adv_buckets["adverse"] if adv < 0 else adv_buckets["favorable"]).append(f.pnl)
+    if adv_buckets["favorable"] or adv_buckets["adverse"]:
+        t = Table(title=f"{mode} PnL by adverse move @ 5m")
+        t.add_column("move"); t.add_column("tokens", justify="right"); t.add_column("pnl", justify="right")
+        for label, pnls in adv_buckets.items():
+            if pnls:
+                t.add_row(label, str(len(pnls)), f"${sum(pnls):+.2f}")
+        console.print(t)
+
+    tte_side: dict[str, list[float]] = {}
+    for f in by_token.values():
+        key = f"{f.label}_{_tte_bucket(f.tte_s)}"
+        tte_side.setdefault(key, []).append(f.pnl)
+    if tte_side:
+        t = Table(title=f"{mode} PnL by side + TTE at fill")
+        t.add_column("setup"); t.add_column("tokens", justify="right"); t.add_column("pnl", justify="right")
+        for key in sorted(tte_side):
+            pnls = tte_side[key]
+            t.add_row(key, str(len(pnls)), f"${sum(pnls):+.2f}")
+        console.print(t)
+
+    bands = [(0, 0.10), (0.10, 0.30), (0.30, 0.70), (0.70, 0.90), (0.90, 1.01)]
+    band_pnl: dict[str, list[float]] = {}
+    for f in by_token.values():
+        for lo, hi in bands:
+            if lo <= f.price < hi:
+                label = f"{int(lo*100)}-{int(hi*100)}c"
+                band_pnl.setdefault(label, []).append(f.pnl)
+                break
+    if band_pnl:
+        t = Table(title=f"{mode} PnL by fill price band")
+        t.add_column("band"); t.add_column("tokens", justify="right"); t.add_column("pnl", justify="right")
+        for label in sorted(band_pnl):
+            pnls = band_pnl[label]
+            t.add_row(label, str(len(pnls)), f"${sum(pnls):+.2f}")
+        console.print(t)
 
 
 def _print_arb(console: Console, conn: psycopg.Connection) -> None:

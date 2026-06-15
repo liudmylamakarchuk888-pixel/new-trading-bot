@@ -28,6 +28,7 @@ from .data.clob_websocket import MarketWebSocket
 from .data.crypto_feed import CryptoFeed
 from .data.recorder import DataHub, Recorder
 from .paper.paper_engine import StrategyEngine
+from .strategy.calibration_gate import CalibrationGate
 from .paper.batch_settle import settle_open_positions
 from .paper.settlement import resolve_outcome
 from .risk import kill_switch
@@ -65,7 +66,9 @@ class LiveRunner:
         self.engine: StrategyEngine | None = None
         if paper:
             risk = RiskEngine(cfg)
-            self.engine = StrategyEngine(cfg, self.hub, self.sink, risk, mode="paper")
+            calibration = CalibrationGate(cfg)
+            self.engine = StrategyEngine(cfg, self.hub, self.sink, risk, mode="paper",
+                                          calibration=calibration)
         self._http: httpx.AsyncClient | None = None
         self._db = None
 
@@ -220,10 +223,12 @@ class LiveRunner:
 
     async def run(self) -> None:
         mode = "PAPER TRADING (no real orders)" if self.paper else "DATA COLLECTION"
-        log.info("starting %s | db=%s | bankroll=$%.0f min_edge=%.1f%% paper_tte<=%.0fh",
+        log.info("starting %s | db=%s | bankroll=$%.0f min_edge=%.1f%% "
+                 "tte=%.0f-%.0fh trade=%s no_side=%s",
                  mode, _redact_db_url(self.cfg.database_url),
                  self.cfg.bankroll, self.cfg.min_edge * 100,
-                 self.cfg.paper_max_tte_hours if self.paper else 0)
+                 self.cfg.paper_min_tte_hours, self.cfg.paper_max_tte_hours,
+                 self.cfg.trade_enabled, self.cfg.allow_no_side)
         self._db = await connect_async(self.cfg.database_url)
         self._http = httpx.AsyncClient()
         try:
@@ -270,6 +275,13 @@ class LiveRunner:
         if rows:
             log.info("restored risk state from %d prior settlements "
                      "(consecutive losses: %d)", len(rows), self.engine.risk.consecutive_losses)
+        if self.engine.calibration is not None:
+            import psycopg
+            sync = psycopg.connect(self.cfg.database_url)
+            try:
+                self.engine.calibration.load(sync, mode="paper")
+            finally:
+                sync.close()
 
 
 def _redact_db_url(url: str) -> str:

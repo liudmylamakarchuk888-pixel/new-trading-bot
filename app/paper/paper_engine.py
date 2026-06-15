@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from datetime import datetime, timezone
 
 from ..config import Settings
 from ..data.recorder import DataHub
@@ -22,7 +23,8 @@ from ..risk.risk_engine import RiskEngine
 from ..storage.db import Sink
 from ..storage.models import Market, OrderBook, PaperOrder, Signal, TradeTick
 from ..strategy import arbitrage
-from ..strategy.edge_detector import evaluate_market, maker_price
+from ..strategy.calibration_gate import CalibrationGate
+from ..strategy.edge_detector import edge_at_price, evaluate_market, maker_price, real_edge
 from ..strategy.fair_price import annualized_vol, fair_yes_probability
 from .position_manager import PositionManager
 from .settlement import ZERO_FILL_EXCLUDE_CANCEL
@@ -31,7 +33,6 @@ log = logging.getLogger(__name__)
 
 EPS = 1e-9
 
-# skip reason -> cancel_reason persisted on paper_orders
 _CANCEL_REASON = {
     "expiry_cutoff": "market_expiry",
     "crossed_book": "stale_book",
@@ -45,8 +46,8 @@ class PaperBroker:
     """Holds open virtual maker orders; at most one order per token."""
 
     def __init__(self):
-        self.orders: dict[str, PaperOrder] = {}        # order_id -> order
-        self._by_token: dict[str, str] = {}            # token_id -> order_id
+        self.orders: dict[str, PaperOrder] = {}
+        self._by_token: dict[str, str] = {}
 
     def order_for_token(self, token_id: str) -> PaperOrder | None:
         oid = self._by_token.get(token_id)
@@ -67,13 +68,13 @@ class PaperBroker:
             if o.condition_id == condition_id and o.status == "open"
         )
 
+    def total_open_value_usd(self) -> float:
+        return sum(o.remaining * o.price for o in self.orders.values() if o.status == "open")
+
     def orders_for_market(self, condition_id: str) -> list[PaperOrder]:
         return [o for o in self.orders.values() if o.condition_id == condition_id]
 
-    # fill simulation ---------------------------------------------------------
-
     def match_trade(self, tick: TradeTick) -> list[tuple[PaperOrder, float, float]]:
-        """Trade printed strictly below our bid -> our level was traded through."""
         order = self.order_for_token(tick.token_id)
         if order is None or order.status != "open":
             return []
@@ -83,12 +84,11 @@ class PaperBroker:
         return []
 
     def match_book(self, book: OrderBook) -> list[tuple[PaperOrder, float, float]]:
-        """Ask crossed our bid -> we would have been matched at our limit price."""
         order = self.order_for_token(book.token_id)
         if order is None or order.status != "open":
             return []
         if book.crossed:
-            return []  # corrupted book: a bogus low ask must not create fake fills
+            return []
         ba = book.best_ask
         if ba is None or ba > order.price + EPS:
             return []
@@ -98,24 +98,31 @@ class PaperBroker:
 
 
 class StrategyEngine:
-    def __init__(self, cfg: Settings, hub: DataHub, sink: Sink, risk: RiskEngine, mode: str):
+    def __init__(
+        self,
+        cfg: Settings,
+        hub: DataHub,
+        sink: Sink,
+        risk: RiskEngine,
+        mode: str,
+        calibration: CalibrationGate | None = None,
+    ):
         self.cfg = cfg
         self.hub = hub
         self.sink = sink
         self.risk = risk
         self.mode = mode
+        self.calibration = calibration
         self.broker = PaperBroker()
         self.positions = PositionManager()
-        self._skip_log: dict[tuple[str, str], float] = {}   # (token, reason) -> last persist ts
-        self._arb_log: dict[tuple[str, str], float] = {}    # (condition_id, status) -> last persist ts
-        self._cooldown: dict[str, float] = {}               # token_id -> last non-replace cancel ts
-        self._market_cooldown: dict[str, float] = {}        # condition_id -> last new order ts
-        self._zero_fill_count: dict[str, int] = {}         # condition_id -> consecutive zero-fill cancels
-        self._zero_fill_ban: dict[str, float] = {}          # condition_id -> banned until ts
+        self._skip_log: dict[tuple[str, str], float] = {}
+        self._arb_log: dict[tuple[str, str], float] = {}
+        self._cooldown: dict[str, float] = {}
+        self._market_cooldown: dict[str, float] = {}
+        self._zero_fill_count: dict[str, int] = {}
+        self._zero_fill_ban: dict[str, float] = {}
         self._kill_logged = False
-        self.stats = {"orders": 0, "fills": 0, "settlements": 0, "arbs": 0}
-
-    # ---- periodic evaluation ---------------------------------------------------
+        self.stats = {"orders": 0, "fills": 0, "settlements": 0, "exits": 0, "arbs": 0}
 
     def evaluate(self, now: float) -> None:
         if kill_switch.is_active(self.cfg.kill_switch_file):
@@ -134,10 +141,14 @@ class StrategyEngine:
             log.info("KILL SWITCH cleared (%s): resuming paper trading", self.cfg.kill_switch_file)
             self._kill_logged = False
 
+        self._check_order_ttl(now)
+        self._check_adverse_spot(now)
+        if self.cfg.exit_enabled and self.cfg.trade_enabled:
+            self._manage_exits(now)
+
         vol_cache: dict[str, float | None] = {}
         for market in list(self.hub.markets.values()):
             if market.closed or (market.end_ts - now) <= self.cfg.expiry_cancel_s:
-                # too close to expiry (or already done): flatten open orders, stop quoting
                 self.cancel_market_orders(market.condition_id, now, "market_expiry")
                 continue
             tte = market.end_ts - now
@@ -158,7 +169,7 @@ class StrategyEngine:
                 )
             sigma = vol_cache[market.asset]
             if sigma is None:
-                continue  # no volatility estimate -> no trade
+                continue
 
             fair_yes = fair_yes_probability(market, spot[1], sigma, now)
             yes_book = self.hub.get_book(market.yes_token_id)
@@ -170,7 +181,7 @@ class StrategyEngine:
                 self._persist_signal(sig)
                 if sig.action == "enter":
                     book = yes_book if sig.token_id == market.yes_token_id else no_book
-                    self._manage_entry(market, sig, book, yes_book, no_book, now)
+                    self._manage_entry(market, sig, book, yes_book, no_book, now, spot[1])
                 else:
                     existing = self.broker.order_for_token(sig.token_id)
                     if existing is not None and self._should_cancel(sig):
@@ -178,16 +189,107 @@ class StrategyEngine:
                         self._cancel(existing, now, reason)
 
     def _should_cancel(self, sig: Signal) -> bool:
-        """Hysteresis: low_edge alone does not cancel until edge < exit_edge."""
         if sig.reason in ("expiry_cutoff", "crossed_book", "no_liquidity", "wide_spread"):
             return True
         if sig.reason == "low_edge":
-            return sig.edge is None or sig.edge < self.cfg.exit_edge
+            threshold = self.cfg.cancel_if_edge_below
+            return sig.edge is None or sig.edge < threshold
         return False
+
+    def _check_order_ttl(self, now: float) -> None:
+        if self.cfg.order_ttl_seconds <= 0:
+            return
+        for order in list(self.broker.orders.values()):
+            if order.status == "open" and (now - order.created_ts) >= self.cfg.order_ttl_seconds:
+                self._cancel(order, now, "order_ttl")
+
+    def _check_adverse_spot(self, now: float) -> None:
+        bps = self.cfg.cancel_if_adverse_spot_bps
+        if bps <= 0:
+            return
+        for order in list(self.broker.orders.values()):
+            if order.status != "open" or order.spot_at_order is None:
+                continue
+            market = self.hub.markets.get(order.condition_id)
+            if market is None:
+                continue
+            spot_row = self.hub.spot.get(market.asset)
+            if spot_row is None:
+                continue
+            spot_now = spot_row[1]
+            raw_move = (spot_now - order.spot_at_order) / order.spot_at_order
+            adverse = self._is_adverse_move(order.label, market.direction, raw_move)
+            if adverse and abs(raw_move) * 10000 >= bps:
+                self._cancel(order, now, "adverse_spot")
+
+    @staticmethod
+    def _is_adverse_move(label: str, direction: str, raw_move: float) -> bool:
+        up = raw_move > 0
+        if direction == "above":
+            good = up if label == "YES" else not up
+        else:
+            good = (not up) if label == "YES" else up
+        return not good
+
+    def _manage_exits(self, now: float) -> None:
+        for token_id, pos in list(self.positions.positions.items()):
+            if pos.size <= 0:
+                continue
+            market = self.hub.markets.get(pos.condition_id)
+            if market is None:
+                continue
+            book = self.hub.get_book(token_id)
+            if book is None or book.crossed or book.best_bid is None:
+                continue
+            bid = book.best_bid
+            tte = market.end_ts - now
+            spot_row = self.hub.spot.get(market.asset)
+            if spot_row is None:
+                continue
+            sigma = annualized_vol(
+                self.hub.close_series(market.asset),
+                lam=self.cfg.vol_lambda, min_obs=self.cfg.min_vol_candles,
+            )
+            if sigma is None:
+                continue
+            fair_yes = fair_yes_probability(market, spot_row[1], sigma, now)
+            fair = fair_yes if pos.label == "YES" else 1.0 - fair_yes
+            cur_edge = real_edge(fair, bid, self.cfg)
+
+            reason: str | None = None
+            sell_frac = 1.0
+            if cur_edge < self.cfg.exit_edge_threshold:
+                reason = "edge_exit"
+            elif bid >= pos.avg_price + self.cfg.exit_take_profit_pct:
+                reason = "take_profit"
+                sell_frac = self.cfg.exit_take_profit_frac
+            elif (tte <= self.cfg.exit_near_expiry_hours * 3600
+                  and fair < self.cfg.exit_near_expiry_prob):
+                reason = "near_expiry"
+
+            if reason is None:
+                continue
+            sell_size = round(pos.size * sell_frac, 2)
+            if sell_size <= 0:
+                continue
+            self._exit_position(pos, market, bid, sell_size, now, reason)
+
+    def _exit_position(self, pos, market: Market, exit_price: float,
+                       size: float, now: float, reason: str) -> None:
+        pnl = size * (exit_price - pos.avg_price)
+        self.sink.exit(now, pos.condition_id, pos.token_id, pos.label,
+                       size, pos.avg_price, exit_price, pnl, reason)
+        self.positions.reduce(pos.token_id, size)
+        self.risk.on_exit(pnl, now)
+        self.stats["exits"] += 1
+        log.info("PAPER EXIT %s %.0f @ %.2f reason=%s pnl %+.2f",
+                 pos.label, size, exit_price, reason, pnl)
 
     def _scan_arb(self, market: Market, yes_book, no_book, now: float) -> None:
         opp = arbitrage.scan(market, yes_book, no_book, now, self.cfg)
         if opp is None:
+            return
+        if self.cfg.block_crossed_book_arb and opp.status == "crossed_book":
             return
         key = (market.condition_id, opp.status)
         if now - self._arb_log.get(key, 0.0) < self.cfg.arb_log_interval_s:
@@ -199,34 +301,68 @@ class StrategyEngine:
             log.info("ARB %s yes=%.3f no=%.3f edge=%.3f gap=%.2fs",
                      market.question[:60], opp.yes_ask, opp.no_ask, opp.edge,
                      opp.book_ts_gap)
-        else:
-            log.debug("ARB rejected (%s) %s yes=%.3f no=%.3f edge=%.3f gap=%.2fs",
-                      opp.status, market.question[:60], opp.yes_ask, opp.no_ask,
-                      opp.edge, opp.book_ts_gap)
+
+    def _underlying_day_exposure(self, asset: str, end_ts: float) -> float:
+        day = datetime.fromtimestamp(end_ts, tz=timezone.utc).strftime("%Y-%m-%d")
+        total = 0.0
+        for pos in self.positions.positions.values():
+            m = self.hub.markets.get(pos.condition_id)
+            if m is None or m.asset != asset:
+                continue
+            mday = datetime.fromtimestamp(m.end_ts, tz=timezone.utc).strftime("%Y-%m-%d")
+            if mday == day:
+                total += pos.cost_usd
+        for order in self.broker.orders.values():
+            if order.status != "open":
+                continue
+            m = self.hub.markets.get(order.condition_id)
+            if m is None or m.asset != asset:
+                continue
+            mday = datetime.fromtimestamp(m.end_ts, tz=timezone.utc).strftime("%Y-%m-%d")
+            if mday == day:
+                total += order.remaining * order.price
+        return total
 
     def _manage_entry(self, market: Market, sig: Signal, book: OrderBook | None,
-                      yes_book: OrderBook | None, no_book: OrderBook | None, now: float) -> None:
+                      yes_book: OrderBook | None, no_book: OrderBook | None,
+                      now: float, spot: float) -> None:
+        if not self.cfg.trade_enabled:
+            self._persist_skip(sig, now, "trade_disabled")
+            return
         if book is None or sig.best_bid is None or sig.best_ask is None:
             return
-        # no averaging down: never add to an existing position in the same token
         if self.positions.has_position(sig.token_id):
             self._persist_skip(sig, now, "existing_position")
             return
+
+        if self.calibration is not None:
+            tte = market.end_ts - now
+            ok, reason = self.calibration.check(market.asset, sig.label, tte, sig.edge)
+            if not ok:
+                self._persist_skip(sig, now, reason)
+                return
+
         price = maker_price(sig.fair, sig.best_bid, sig.best_ask, self.cfg)
         if price is None:
             return
 
+        projected_edge = edge_at_price(sig.fair, price, self.cfg)
+        if projected_edge < self.cfg.min_edge:
+            self._persist_skip(sig, now, "low_real_edge")
+            return
+
         existing = self.broker.order_for_token(sig.token_id)
         if existing is not None:
-            # keep the resting order unless fair moved enough AND price moves >= 1 tick
             fair_moved = abs(sig.fair - existing.fair) >= self.cfg.replace_edge_threshold
-            price_changed = abs(existing.price - price) >= self.cfg.tick - EPS
-            if not (fair_moved and price_changed):
+            price_delta = price - existing.price
+            min_ticks = self.cfg.replace_only_if_price_improves_ticks * self.cfg.tick
+            price_improved = price_delta <= -min_ticks + EPS  # lower buy price = better
+            price_changed = abs(price_delta) >= min_ticks - EPS
+            if not (fair_moved and price_changed and price_improved):
                 self._persist_skip(sig, now, "existing_open_order")
                 return
             self._cancel(existing, now, "replace")
         else:
-            # cooldown after a non-replace cancel on this token
             if now - self._cooldown.get(sig.token_id, 0.0) < self.cfg.order_cooldown_s:
                 self._persist_skip(sig, now, "cooldown")
                 return
@@ -237,12 +373,17 @@ class StrategyEngine:
                 self._persist_skip(sig, now, "zero_fill_cooldown")
                 return
 
-        exposure = (self.positions.exposure_usd(market.condition_id)
-                    + self.broker.open_value_usd(market.condition_id))
+        market_exposure = (self.positions.exposure_usd(market.condition_id)
+                           + self.broker.open_value_usd(market.condition_id))
+        total_exposure = (self.positions.total_exposure_usd()
+                          + self.broker.total_open_value_usd())
+        underlying_day = self._underlying_day_exposure(market.asset, market.end_ts)
         add_usd = self.risk.trade_size_usd()
         if (market.end_ts - now) <= self.cfg.expiry_taper_s:
-            add_usd *= 0.5  # ramp size down close to expiry
-        ok, reason = self.risk.check_entry(now, exposure, add_usd)
+            add_usd *= 0.5
+        ok, reason = self.risk.check_entry(
+            now, market_exposure, add_usd, total_exposure, underlying_day,
+        )
         if not ok:
             self._persist_skip(sig, now, f"risk:{reason}")
             return
@@ -253,7 +394,8 @@ class StrategyEngine:
         order = PaperOrder(
             id=uuid.uuid4().hex[:12], created_ts=now,
             condition_id=market.condition_id, token_id=sig.token_id, label=sig.label,
-            side="BUY", price=price, size=size, fair=sig.fair, edge=sig.edge or 0.0,
+            side="BUY", price=price, size=size, fair=sig.fair,
+            edge=projected_edge, spot_at_order=spot,
         )
         self.broker.place(order)
         self.sink.order_insert(order)
@@ -261,11 +403,11 @@ class StrategyEngine:
         self._market_cooldown[market.condition_id] = now
         fair_yes = sig.fair if sig.label == "YES" else 1.0 - sig.fair
         log.info(
-            "PAPER ORDER selected_side=%s %.0f @ %.2f edge=%.4f | market_question=%r "
+            "PAPER ORDER selected_side=%s %.0f @ %.2f real_edge=%.4f | market_question=%r "
             "condition_id=%s yes_token_id=%s no_token_id=%s "
             "yes_best_bid=%s yes_best_ask=%s no_best_bid=%s no_best_ask=%s "
             "fair_yes=%.4f fair_no=%.4f",
-            sig.label, size, price, sig.edge or 0.0, market.question,
+            sig.label, size, price, projected_edge, market.question,
             market.condition_id, market.yes_token_id, market.no_token_id,
             yes_book.best_bid if yes_book else None,
             yes_book.best_ask if yes_book else None,
@@ -275,7 +417,6 @@ class StrategyEngine:
         )
 
     def mark_prices(self) -> dict[str, float]:
-        """Latest mid per token for unrealized PnL."""
         marks: dict[str, float] = {}
         for token_id in self.positions.positions:
             book = self.hub.get_book(token_id)
@@ -286,10 +427,19 @@ class StrategyEngine:
                 marks[token_id] = mid
         return marks
 
-    def unrealized_summary(self):
-        return self.positions.unrealized(self.mark_prices())
+    def bid_prices(self) -> dict[str, float]:
+        bids: dict[str, float] = {}
+        for token_id in self.positions.positions:
+            book = self.hub.get_book(token_id)
+            if book is None or book.crossed:
+                continue
+            bb = book.best_bid
+            if bb is not None:
+                bids[token_id] = bb
+        return bids
 
-    # ---- event hooks -------------------------------------------------------------
+    def unrealized_summary(self):
+        return self.positions.unrealized(self.mark_prices(), self.bid_prices())
 
     def on_trade(self, tick: TradeTick, now: float) -> None:
         self._apply_fills(self.broker.match_trade(tick), now)
@@ -300,8 +450,16 @@ class StrategyEngine:
     def _apply_fills(self, fills: list[tuple[PaperOrder, float, float]], now: float) -> None:
         for order, price, qty in fills:
             fair_at_fill, spot_at_fill, tte_s = self._fill_context(order, now)
+            book = self.hub.get_book(order.token_id)
+            spread = book.spread if book else None
+            order_age = now - order.created_ts
             order.filled = min(order.size, order.filled + qty)
-            self.sink.fill(order, now, price, qty, fair_at_fill, spot_at_fill, tte_s)
+            self.sink.fill(
+                order, now, price, qty,
+                fair_at_fill=fair_at_fill, spot_at_fill=spot_at_fill, tte_s=tte_s,
+                spot_at_order=order.spot_at_order, fair_at_order=order.fair,
+                spread_at_fill=spread, order_age_s=order_age,
+            )
             self.positions.on_fill(order.condition_id, order.token_id, order.label, price, qty)
             self._zero_fill_count[order.condition_id] = 0
             self._zero_fill_ban.pop(order.condition_id, None)
@@ -312,10 +470,13 @@ class StrategyEngine:
                 self.broker.remove(order)
             else:
                 self.sink.order_update(order)
-            log.info("PAPER FILL %s %.0f @ %.2f (%s)", order.label, qty, price, order.id)
+            fill_edge = real_edge(fair_at_fill, price, self.cfg) if fair_at_fill else None
+            log.info("PAPER FILL %s %.0f @ %.2f fill_edge=%s (%s)",
+                     order.label, qty, price,
+                     f"{fill_edge:.4f}" if fill_edge is not None else "?",
+                     order.id)
 
     def _fill_context(self, order: PaperOrder, now: float) -> tuple[float | None, float | None, float | None]:
-        """Fair value, spot, and time-to-expiry at fill time (for calibration reports)."""
         market = self.hub.markets.get(order.condition_id)
         if market is None:
             return None, None, None
@@ -333,8 +494,6 @@ class StrategyEngine:
         fair_yes = fair_yes_probability(market, spot, sigma, now)
         fair = fair_yes if order.label == "YES" else 1.0 - fair_yes
         return fair, spot, tte_s
-
-    # ---- lifecycle -----------------------------------------------------------------
 
     def _cancel(self, order: PaperOrder, now: float, reason: str) -> None:
         order.status = "cancelled"
@@ -388,7 +547,6 @@ class StrategyEngine:
         ))
 
     def _persist_signal(self, sig: Signal) -> None:
-        """Always persist 'enter'; throttle repeated identical skips to 1 per 5 min."""
         if sig.action == "enter":
             self.sink.signal(sig)
             return

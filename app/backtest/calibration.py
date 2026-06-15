@@ -14,7 +14,7 @@ from ..storage.models import Market
 from ..strategy.fair_price import annualized_vol, fair_yes_probability
 
 TTE_LABELS = ("<6h", "6-24h", "24-48h", ">48h")
-SPOT_HORIZONS_MIN = (5, 15, 30)
+SPOT_HORIZONS_MIN = (1, 5, 15, 30)
 
 
 def _tte_bucket(tte_s: float | None) -> str:
@@ -86,6 +86,7 @@ class EnrichedFill:
     pnl: float | None
     spot_horizons: dict[int, float | None]  # minutes -> favorable spot pct
     tte_bucket: str
+    order_age_s: float | None = None
 
 
 def _load_markets(conn: psycopg.Connection, condition_ids: set[str]) -> dict[str, Market]:
@@ -109,7 +110,7 @@ def _load_markets(conn: psycopg.Connection, condition_ids: set[str]) -> dict[str
 def enrich_fills(conn: psycopg.Connection, cfg: Settings, mode: str) -> list[EnrichedFill]:
     rows = conn.execute(
         """SELECT f.id AS fill_id, f.ts, f.price, f.size, f.token_id, f.condition_id,
-                  f.fair_at_fill, f.spot_at_fill, f.tte_s,
+                  f.fair_at_fill, f.spot_at_fill, f.tte_s, f.order_age_s,
                   o.fair AS entry_fair, o.edge AS entry_edge, o.label,
                   s.pnl AS settlement_pnl,
                   m.asset, m.direction, m.end_ts
@@ -181,6 +182,7 @@ def enrich_fills(conn: psycopg.Connection, cfg: Settings, mode: str) -> list[Enr
             pnl=r["settlement_pnl"],
             spot_horizons=spot_horizons,
             tte_bucket=_tte_bucket(tte_s),
+            order_age_s=r["order_age_s"],
         ))
     return out
 
@@ -237,7 +239,10 @@ def fill_quality_summary(fills: list[EnrichedFill], cfg: Settings) -> dict:
             return None
         return sum(1 for v in known if v < 0) / len(known) * 100
 
-    return {
+    fav_keys = {1: "avg_fav_spot_1m", 5: "avg_fav_spot_5m", 15: "avg_fav_spot_15m", 30: "avg_fav_spot_30m"}
+    adv_keys = {1: "adverse_1m_pct", 5: "adverse_5m_pct", 15: "adverse_15m_pct", 30: "adverse_30m_pct"}
+
+    result = {
         "fills": len(fills),
         "with_fair": len(with_fair),
         "settled": len(settled),
@@ -245,11 +250,11 @@ def fill_quality_summary(fills: list[EnrichedFill], cfg: Settings) -> dict:
         "avg_fill_edge": _avg([f.fill_edge for f in with_fair if f.fill_edge is not None]),
         "avg_fair_drift": _avg([f.fair_drift for f in with_fair if f.fair_drift is not None]),
         "avg_price_vs_fair": _avg([f.fair_at_fill - f.price for f in with_fair if f.fair_at_fill]),
-        "adverse_5m_pct": adverse_rate(5),
-        "adverse_15m_pct": adverse_rate(15),
-        "adverse_30m_pct": adverse_rate(30),
-        "avg_fav_spot_5m": _avg([f.spot_horizons[5] for f in with_fair if f.spot_horizons.get(5) is not None]),
-        "avg_fav_spot_15m": _avg([f.spot_horizons[15] for f in with_fair if f.spot_horizons.get(15) is not None]),
-        "avg_fav_spot_30m": _avg([f.spot_horizons[30] for f in with_fair if f.spot_horizons.get(30) is not None]),
         "cost": cfg.cost,
     }
+    for mins in (1, 5, 15, 30):
+        result[adv_keys[mins]] = adverse_rate(mins)
+        result[fav_keys[mins]] = _avg([
+            f.spot_horizons[mins] for f in with_fair if f.spot_horizons.get(mins) is not None
+        ])
+    return result

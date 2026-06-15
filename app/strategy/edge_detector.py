@@ -1,13 +1,13 @@
 """Edge detection: trade only when fair probability beats the market price by enough.
 
-    edge = fair - best_ask - cost
-    enter only if edge >= min_edge, spread is sane, and expiry is not imminent.
+    raw_edge = fair - best_ask - cost
+    real_edge = fair - fill_price - cost + maker_rebate   (at projected fill price)
 
 Detection is deliberately conservative (measured against the ask), while the
 actual paper order is placed as a maker order below the ask.
 
-Exit hysteresis (edge dropped below exit_edge) is applied in StrategyEngine so
-a resting order is not cancelled just because edge fell from 3% to 2%.
+Exit hysteresis (edge dropped below cancel_if_edge_below) is applied in
+StrategyEngine so a resting order is not cancelled just because edge fell slightly.
 """
 from __future__ import annotations
 
@@ -15,6 +15,11 @@ import math
 
 from ..config import Settings
 from ..storage.models import Market, OrderBook, Signal
+
+
+def real_edge(fair: float, fill_price: float, cfg: Settings) -> float:
+    """Edge at a specific fill price, including fees and maker rebate."""
+    return fair - fill_price - cfg.cost + cfg.maker_rebate
 
 
 def evaluate_market(
@@ -34,6 +39,14 @@ def evaluate_market(
     expiring = (market.end_ts - now) <= cfg.expiry_cutoff_s
 
     for label, token_id, fair, book in sides:
+        if label == "NO" and not cfg.allow_no_side:
+            out.append(Signal(
+                ts=now, condition_id=market.condition_id, token_id=token_id, label=label,
+                fair=fair, best_bid=None, best_ask=None, spread=None, edge=None,
+                action="skip", reason="no_side_disabled",
+            ))
+            continue
+
         bb = book.best_bid if book else None
         ba = book.best_ask if book else None
         spread = book.spread if book else None
@@ -42,7 +55,6 @@ def evaluate_market(
         if book is None or ba is None or bb is None:
             action, reason = "skip", "no_liquidity"
         elif book.crossed:
-            # corrupted book state (bid >= ask): prices cannot be trusted
             action, reason = "skip", "crossed_book"
         elif expiring:
             action, reason = "skip", "expiry_cutoff"
@@ -81,3 +93,8 @@ def maker_price(fair: float, best_bid: float, best_ask: float, cfg: Settings) ->
     if p < 0.01 or p >= best_ask:
         return None
     return p
+
+
+def edge_at_price(fair: float, price: float, cfg: Settings) -> float:
+    """Projected real edge if filled at the given maker price."""
+    return real_edge(fair, price, cfg)
